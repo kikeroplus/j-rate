@@ -1339,6 +1339,19 @@ namespace JRate
             menu.Items.Add(explorer);
             menu.Items.Add(new Separator());
 
+            // ComfyUI で動画を生成 (画像のときだけ)
+            var makeVideo = new MenuItem { Header = "動画にする (ComfyUI)" };
+            makeVideo.Click += delegate
+            {
+                var it = Current;
+                if (it != null && !it.IsVideo) MakeVideo(it);
+            };
+            menu.Items.Add(makeVideo);
+            var comfySettings = new MenuItem { Header = "動画生成の設定..." };
+            comfySettings.Click += delegate { ShowComfySettings(); };
+            menu.Items.Add(comfySettings);
+            menu.Items.Add(new Separator());
+
             var ratingItems = new MenuItem[6];
             for (int i = 1; i <= 5; i++)
             {
@@ -1363,6 +1376,7 @@ namespace JRate
                 var it = Current;
                 for (int i = 1; i <= 5; i++) ratingItems[i].IsChecked = it != null && it.Rating == i;
                 clear.IsEnabled = it != null && it.Rating > 0;
+                makeVideo.IsEnabled = it != null && !it.IsVideo;
             };
 
             // 画像がないとき・処理中はメニューを出さない
@@ -1376,6 +1390,104 @@ namespace JRate
             mainArea.ContextMenuOpening += guard;
             thumbList.ContextMenu = menu;
             thumbList.ContextMenuOpening += guard;
+        }
+
+        // ---------------- 動画にする (ComfyUI) ----------------
+
+        private int videoJobs;   // 生成中の件数
+
+        private async void MakeVideo(ImageItem item)
+        {
+            string workflow = ComfySettings.WorkflowPath;
+            if (string.IsNullOrEmpty(workflow) || !File.Exists(workflow))
+            {
+                // 初回はワークフローを指定してもらう
+                if (!ShowComfySettings()) return;
+                workflow = ComfySettings.WorkflowPath;
+                if (string.IsNullOrEmpty(workflow) || !File.Exists(workflow)) return;
+            }
+            string url = ComfySettings.Url;
+            string src = item.Path;
+            string name = item.FileName;
+
+            // プロンプトと秒数を聞く
+            string prompt = null;
+            double? seconds = null;
+            try
+            {
+                var wf = ComfyVideo.LoadWorkflow(ComfyVideo.NewSerializer(), workflow);
+                var dlg = new ComfyPromptDialog(name, ComfyVideo.HasPrompt(wf), ComfyVideo.GetDuration(wf),
+                                                ComfyVideo.DurationIsInteger(wf));
+                dlg.Owner = gridWindow != null && gridWindow.IsActive ? (Window)gridWindow : this;
+                if (dlg.ShowDialog() != true) return;
+                prompt = dlg.Prompt;
+                seconds = dlg.Seconds;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "動画にする - J-Rate", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            videoJobs++;
+            bool done = false;
+            var dispatcher = Dispatcher;
+            Action<string> report = msg => dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (done) return;   // 完了後に届いた古い進捗は無視
+                statusText.Text = "動画生成 " + name + " : " + msg +
+                                  (videoJobs > 1 ? "  (処理中 " + videoJobs + " 件)" : "");
+            }));
+            report("準備中...");
+
+            string result = null;
+            Exception error = null;
+            try
+            {
+                result = await Task.Run(() => ComfyVideo.Generate(src, url, workflow, prompt, seconds, report));
+            }
+            catch (Exception ex) { error = ex; }
+            done = true;
+            videoJobs--;
+            string rest = videoJobs > 0 ? "  (処理中 " + videoJobs + " 件)" : "";
+
+            if (error != null)
+            {
+                statusText.Text = "動画を作れませんでした: " + name + rest;
+                string text = error is System.Net.WebException
+                    ? "ComfyUI に接続できません (" + url + ")。\nComfyUI が起動しているか確認してください。\n\n" + error.Message
+                    : error.Message;
+                MessageBox.Show(this, name + "\n\n" + text, "動画にする - J-Rate", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            statusText.Text = "動画を作成しました: " + System.IO.Path.GetFileName(result) + rest;
+            AddGeneratedFile(result);
+        }
+
+        // 出来た動画が今開いているフォルダのものなら一覧に加える
+        private void AddGeneratedFile(string path)
+        {
+            if (currentFolder == null || !FolderNode.SamePath(System.IO.Path.GetDirectoryName(path), currentFolder)) return;
+            if (!IsSupportedImage(path) || !File.Exists(path)) return;
+            if (items.Any(x => string.Equals(x.Path, path, StringComparison.OrdinalIgnoreCase))) return;
+
+            var it = new ImageItem(path, File.GetLastWriteTimeUtc(path));
+            items.Add(it);   // 並べ替え (CustomSort) とフィルターは view が反映する
+            Task.Run(() =>
+            {
+                try { return ShellThumbnail.Load(path, ThumbSize); }
+                catch { return null; }
+            }).ContinueWith(t =>
+            {
+                if (t.Result != null) it.Thumbnail = t.Result;
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        private bool ShowComfySettings()
+        {
+            var dlg = new ComfySettingsDialog();
+            dlg.Owner = this;
+            return dlg.ShowDialog() == true;
         }
 
         // ---------------- フォルダ読み込み ----------------
@@ -3166,6 +3278,266 @@ namespace JRate
         private void Error(string message)
         {
             MessageBox.Show(this, message, Title, MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+    // ------------------------------------------------------------------
+    // 動画生成 (ComfyUI) の設定ダイアログ
+    // ------------------------------------------------------------------
+    public class ComfySettingsDialog : Window
+    {
+        private readonly TextBox urlBox, workflowBox;
+        private readonly TextBlock resultText;
+
+        public ComfySettingsDialog()
+        {
+            Title = "動画生成の設定 (ComfyUI)";
+            Width = 600;
+            SizeToContent = SizeToContent.Height;
+            ResizeMode = ResizeMode.NoResize;
+            WindowStartupLocation = WindowStartupLocation.CenterOwner;
+            ShowInTaskbar = false;
+
+            var panel = new StackPanel { Margin = new Thickness(16) };
+
+            panel.Children.Add(new TextBlock { Text = "ComfyUI の URL" });
+            var urlRow = new DockPanel { Margin = new Thickness(0, 4, 0, 12) };
+            var test = new Button { Content = "接続テスト", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0) };
+            DockPanel.SetDock(test, Dock.Right);
+            urlRow.Children.Add(test);
+            urlBox = new TextBox { Text = ComfySettings.Url, Padding = new Thickness(2, 3, 2, 3) };
+            urlRow.Children.Add(urlBox);
+            panel.Children.Add(urlRow);
+
+            panel.Children.Add(new TextBlock { Text = "ワークフロー (ComfyUI のメニュー「Export (API)」で保存した JSON)" });
+            var wfRow = new DockPanel { Margin = new Thickness(0, 4, 0, 8) };
+            var browse = new Button { Content = "参照...", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0) };
+            DockPanel.SetDock(browse, Dock.Right);
+            wfRow.Children.Add(browse);
+            workflowBox = new TextBox { Text = ComfySettings.WorkflowPath ?? "", Padding = new Thickness(2, 3, 2, 3) };
+            wfRow.Children.Add(workflowBox);
+            panel.Children.Add(wfRow);
+
+            panel.Children.Add(new TextBlock
+            {
+                Text = "ワークフローの「Load Image」ノードの画像が、右クリックした画像に差し替わります。" +
+                       "seed は毎回ランダムになります。出来た動画は元の画像と同じフォルダに「(元の名前)_video.mp4」で保存します。",
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = Brushes.DimGray,
+                Margin = new Thickness(0, 0, 0, 8)
+            });
+            resultText = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 12) };
+            panel.Children.Add(resultText);
+
+            var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+            var ok = new Button { Content = "OK", Width = 90, IsDefault = true };
+            var cancel = new Button { Content = "キャンセル", Width = 90, IsCancel = true, Margin = new Thickness(8, 0, 0, 0) };
+            buttons.Children.Add(ok);
+            buttons.Children.Add(cancel);
+            panel.Children.Add(buttons);
+            Content = panel;
+
+            test.Click += async delegate
+            {
+                string url = urlBox.Text.Trim().TrimEnd('/');
+                resultText.Foreground = Brushes.DimGray;
+                resultText.Text = "接続中...";
+                test.IsEnabled = false;
+                string err = await Task.Run(() => ComfyVideo.Test(url));
+                test.IsEnabled = true;
+                resultText.Foreground = err == null ? Brushes.ForestGreen : Brushes.Firebrick;
+                resultText.Text = err == null ? "ComfyUI に接続できました: " + url : "接続できません: " + err;
+            };
+
+            browse.Click += delegate
+            {
+                var ofd = new Microsoft.Win32.OpenFileDialog();
+                ofd.Title = "API 形式のワークフロー JSON を選択";
+                ofd.Filter = "ワークフロー JSON (*.json)|*.json|すべてのファイル (*.*)|*.*";
+                try
+                {
+                    string cur = workflowBox.Text.Trim();
+                    if (cur.Length > 0 && File.Exists(cur)) ofd.InitialDirectory = System.IO.Path.GetDirectoryName(cur);
+                }
+                catch { }
+                if (ofd.ShowDialog(this) == true)
+                {
+                    workflowBox.Text = ofd.FileName;
+                    Check(ofd.FileName);
+                }
+            };
+
+            ok.Click += delegate
+            {
+                string wf = workflowBox.Text.Trim().Trim('"');
+                if (wf.Length == 0)
+                {
+                    MessageBox.Show(this, "ワークフローの JSON を指定してください。", Title, MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                if (!Check(wf)) return;
+                ComfySettings.Url = urlBox.Text;
+                ComfySettings.WorkflowPath = wf;
+                DialogResult = true;
+            };
+        }
+
+        // ワークフローを確かめて結果を表示する
+        private bool Check(string path)
+        {
+            try
+            {
+                var wf = ComfyVideo.LoadWorkflow(ComfyVideo.NewSerializer(), path);
+                int n = ComfyVideo.FindNodes(wf, "LoadImage").Count;
+                if (n == 0) throw new Exception("ワークフローに「Load Image」(LoadImage) ノードがありません。");
+                resultText.Foreground = Brushes.ForestGreen;
+                resultText.Text = "ワークフローを確認しました (ノード " + wf.Count + " 個、Load Image " + n + " 個" +
+                                  (n > 1 ? " ※すべて同じ画像に差し替わります" : "") + ")";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                resultText.Foreground = Brushes.Firebrick;
+                resultText.Text = ex.Message;
+                return false;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 「動画にする」のたびに出す、プロンプトと秒数の入力ダイアログ
+    // ------------------------------------------------------------------
+    public class ComfyPromptDialog : Window
+    {
+        private const double MaxSeconds = 60;
+
+        private readonly TextBox promptBox, secondsBox;
+        private readonly bool integerSeconds;   // 秒数を整数でしか受け付けないワークフロー
+
+        // ワークフローに入れる場所がない項目は null (ワークフローの値のまま)
+        public string Prompt { get; private set; }
+        public double? Seconds { get; private set; }
+
+        public ComfyPromptDialog(string fileName, bool hasPrompt, double? workflowSeconds, bool integerSeconds)
+        {
+            this.integerSeconds = integerSeconds;
+            Title = "動画にする - " + fileName;
+            Width = 600;
+            SizeToContent = SizeToContent.Height;
+            ResizeMode = ResizeMode.NoResize;
+            WindowStartupLocation = WindowStartupLocation.CenterOwner;
+            ShowInTaskbar = false;
+
+            var panel = new StackPanel { Margin = new Thickness(16) };
+
+            panel.Children.Add(new TextBlock
+            {
+                Text = hasPrompt ? "プロンプト (Enter で開始、Shift+Enter で改行)"
+                                 : "プロンプト (このワークフローには入れる場所がありません)",
+                Foreground = hasPrompt ? Brushes.Black : Brushes.DimGray
+            });
+            promptBox = new TextBox
+            {
+                Text = hasPrompt ? ComfySettings.Prompt : "",
+                IsEnabled = hasPrompt,
+                AcceptsReturn = true,
+                TextWrapping = TextWrapping.Wrap,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Height = 120,
+                Padding = new Thickness(2, 3, 2, 3),
+                Margin = new Thickness(0, 4, 0, 12)
+            };
+            panel.Children.Add(promptBox);
+
+            bool hasSeconds = workflowSeconds != null;
+            var secRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 16) };
+            secRow.Children.Add(new TextBlock { Text = "長さ", VerticalAlignment = VerticalAlignment.Center });
+            string sec = "";
+            if (hasSeconds)
+            {
+                // 前回の秒数、なければワークフローに書かれている秒数
+                double last;
+                sec = TryParseSeconds(ComfySettings.Seconds, out last)
+                    ? ComfySettings.Seconds
+                    : workflowSeconds.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+            secondsBox = new TextBox
+            {
+                Text = sec,
+                IsEnabled = hasSeconds,
+                Width = 60,
+                Padding = new Thickness(2, 3, 2, 3),
+                Margin = new Thickness(8, 0, 6, 0),
+                HorizontalContentAlignment = HorizontalAlignment.Right
+            };
+            secRow.Children.Add(secondsBox);
+            secRow.Children.Add(new TextBlock
+            {
+                Text = hasSeconds ? "秒" : "秒 (このワークフローでは変えられません)",
+                Foreground = hasSeconds ? Brushes.Black : Brushes.DimGray,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            panel.Children.Add(secRow);
+
+            var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+            var ok = new Button { Content = "動画にする", Width = 100, IsDefault = true };
+            var cancel = new Button { Content = "キャンセル", Width = 90, IsCancel = true, Margin = new Thickness(8, 0, 0, 0) };
+            buttons.Children.Add(ok);
+            buttons.Children.Add(cancel);
+            panel.Children.Add(buttons);
+            Content = panel;
+
+            ok.Click += delegate { Accept(); };
+
+            // 複数行の入力欄でも Enter だけで開始できるようにする (改行は Shift+Enter)。
+            // 日本語変換の確定の Enter は Key.ImeProcessed で届くので、ここには来ない
+            promptBox.PreviewKeyDown += delegate(object s, KeyEventArgs e)
+            {
+                if (e.Key == Key.Enter && Keyboard.Modifiers == ModifierKeys.None)
+                {
+                    e.Handled = true;
+                    Accept();
+                }
+            };
+
+            Loaded += delegate
+            {
+                var first = hasPrompt ? promptBox : hasSeconds ? secondsBox : null;
+                if (first == null) { ok.Focus(); return; }
+                first.Focus();
+                first.SelectAll();
+            };
+        }
+
+        private void Accept()
+        {
+            if (secondsBox.IsEnabled)
+            {
+                double sec;
+                if (!TryParseSeconds(secondsBox.Text, out sec) || (integerSeconds && sec != Math.Floor(sec)))
+                {
+                    MessageBox.Show(this, "長さは 1 ～ " + MaxSeconds + " 秒の" + (integerSeconds ? "整数" : "数字") +
+                                          "で指定してください。", Title,
+                                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                    secondsBox.Focus();
+                    secondsBox.SelectAll();
+                    return;
+                }
+                Seconds = sec;
+                ComfySettings.Seconds = secondsBox.Text;
+            }
+            if (promptBox.IsEnabled)
+            {
+                Prompt = promptBox.Text.Trim();
+                ComfySettings.Prompt = Prompt;
+            }
+            DialogResult = true;
+        }
+
+        private static bool TryParseSeconds(string text, out double seconds)
+        {
+            return double.TryParse((text ?? "").Trim(), System.Globalization.NumberStyles.Float,
+                                   System.Globalization.CultureInfo.InvariantCulture, out seconds)
+                   && seconds >= 1 && seconds <= MaxSeconds;
         }
     }
 }

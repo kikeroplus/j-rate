@@ -13,12 +13,13 @@ set WPF=%FW%\WPF
   /r:System.Windows.Forms.dll ^
   /r:System.Drawing.dll ^
   /r:Microsoft.CSharp.dll ^
+  /r:System.Web.Extensions.dll ^
   /resource:MainWindow.xaml,MainWindow.xaml ^
   /resource:ExportDialog.xaml,ExportDialog.xaml ^
   /resource:GridWindow.xaml,GridWindow.xaml ^
   /resource:J-Rate.ico,J-Rate.ico ^
   /win32icon:J-Rate.ico ^
-  JRate.cs
+  JRate.cs ComfyVideo.cs
 if errorlevel 1 (
   echo BUILD FAILED
   exit /b 1
