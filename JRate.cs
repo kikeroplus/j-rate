@@ -54,6 +54,10 @@ namespace JRate
         public DateTime Modified { get; private set; }   // フォルダを開いた時点の更新日時 (並べ替え用)
         public bool IsVideo { get; private set; }
 
+        // 解像度 (ピクセル)。メイン窓に初めて表示したときに調べる。0 = まだ不明
+        public int PixelWidth { get; set; }
+        public int PixelHeight { get; set; }
+
         // サムネールに重ねる「▶」マーク
         public Visibility VideoMark { get { return IsVideo ? Visibility.Visible : Visibility.Collapsed; } }
 
@@ -409,6 +413,32 @@ namespace JRate
                 var tb = new TransformedBitmap(bi, new RotateTransform(angle));
                 tb.Freeze();
                 return tb;
+            }
+        }
+
+        // 画像の解像度 { 幅, 高さ } をヘッダーだけ読んで取得 (画素はデコードしない)。EXIF の回転を反映した見た目の向き。
+        public static int[] ReadSize(string path)
+        {
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, Share))
+            {
+                var dec = BitmapDecoder.Create(fs,
+                    BitmapCreateOptions.DelayCreation | BitmapCreateOptions.PreservePixelFormat | BitmapCreateOptions.IgnoreColorProfile,
+                    BitmapCacheOption.None);
+                var frame = dec.Frames[0];
+                int w = frame.PixelWidth;
+                int h = frame.PixelHeight;
+                int orientation = 1;
+                var md = frame.Metadata as BitmapMetadata;
+                if (md != null)
+                {
+                    object o = SafeQuery(md, "System.Photo.Orientation");
+                    if (o != null)
+                    {
+                        try { orientation = Convert.ToInt32(o); } catch { }
+                    }
+                }
+                if (orientation >= 5 && orientation <= 8) return new[] { h, w };   // 90° / 270° 回転
+                return new[] { w, h };
             }
         }
 
@@ -1541,6 +1571,7 @@ namespace JRate
                 return;
             }
 
+            LoadSize(item);
             BitmapSource bmp;
             if (!cache.TryGetValue(item.Path, out bmp))
             {
@@ -1562,6 +1593,25 @@ namespace JRate
             // 読み込みを待つ間に拡大されて、元解像度の画像に差し替え済みならそのままにする
             if (fullResPath != item.Path) mainImage.Source = bmp;
             Prefetch(ver);
+        }
+
+        // 画像の解像度を調べて情報表示に出す (動画は開いたときに MediaOpened で分かる)
+        private async void LoadSize(ImageItem item)
+        {
+            if (item.PixelWidth > 0) return;
+            string p = item.Path;
+            int[] size;
+            try
+            {
+                size = await Task.Run(() => ImageLoader.ReadSize(p));
+            }
+            catch
+            {
+                return;
+            }
+            item.PixelWidth = size[0];
+            item.PixelHeight = size[1];
+            if (Current == item) UpdateInfo();
         }
 
         // 前後の画像を先読み
@@ -1632,6 +1682,7 @@ namespace JRate
                 infoBadge.Visibility = Visibility.Visible;
                 DrawStars(item.Rating, false);
                 infoText.Text = (thumbList.SelectedIndex + 1) + " / " + thumbList.Items.Count + "    " + item.FileName
+                    + (item.PixelWidth > 0 ? "    " + item.PixelWidth + " × " + item.PixelHeight : "")
                     + (zoom > 1 ? "    拡大 ×" + zoom.ToString("0.0") : "");
             }
 
@@ -2077,6 +2128,13 @@ namespace JRate
             {
                 if (videoPath == null) return;
                 videoOpened = true;
+                var opened = Current;
+                if (opened != null && opened.Path == videoPath && mainVideo.NaturalVideoWidth > 0)
+                {
+                    opened.PixelWidth = mainVideo.NaturalVideoWidth;
+                    opened.PixelHeight = mainVideo.NaturalVideoHeight;
+                    UpdateInfo();
+                }
                 // 開いた直後に一度シークする。これをしないと 1 周目の映像が止まったままになることがある
                 mainVideo.Position = resumePosition;
                 if (!resumePlaying)
