@@ -3431,7 +3431,7 @@ namespace JRate
 
             panel.Children.Add(new TextBlock
             {
-                Text = hasPrompt ? "プロンプト (Enter で開始、Shift+Enter で改行)"
+                Text = hasPrompt ? "プロンプト (Ctrl+Enter で開始)"
                                  : "プロンプト (このワークフローには入れる場所がありません)",
                 Foreground = hasPrompt ? Brushes.Black : Brushes.DimGray
             });
@@ -3479,7 +3479,7 @@ namespace JRate
             panel.Children.Add(secRow);
 
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
-            var ok = new Button { Content = "動画にする", Width = 100, IsDefault = true };
+            var ok = new Button { Content = "動画にする", Width = 100 };
             var cancel = new Button { Content = "キャンセル", Width = 90, IsCancel = true, Margin = new Thickness(8, 0, 0, 0) };
             buttons.Children.Add(ok);
             buttons.Children.Add(cancel);
@@ -3488,11 +3488,10 @@ namespace JRate
 
             ok.Click += delegate { Accept(); };
 
-            // 複数行の入力欄でも Enter だけで開始できるようにする (改行は Shift+Enter)。
-            // 日本語変換の確定の Enter は Key.ImeProcessed で届くので、ここには来ない
-            promptBox.PreviewKeyDown += delegate(object s, KeyEventArgs e)
+            // Enter はプロンプトの改行。開始は「動画にする」ボタンか Ctrl+Enter (どの欄にいても効く)
+            PreviewKeyDown += delegate(object s, KeyEventArgs e)
             {
-                if (e.Key == Key.Enter && Keyboard.Modifiers == ModifierKeys.None)
+                if (e.Key == Key.Enter && Keyboard.Modifiers == ModifierKeys.Control)
                 {
                     e.Handled = true;
                     Accept();
