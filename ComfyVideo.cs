@@ -1,4 +1,4 @@
-// J-Rate : ComfyUI に画像を渡して動画を生成する (右クリック「動画にする」)
+// J-Rate : ComfyUI に画像を渡して動画や画像を生成する (右クリック「生成する」)
 // .NET Framework 4.x 標準の csc.exe (C# 5) でビルドできるように書いている。
 
 using System;
@@ -14,34 +14,299 @@ using System.Web.Script.Serialization;
 namespace JRate
 {
     // ------------------------------------------------------------------
-    // 設定 (%APPDATA%\J-Rate\comfy_url.txt / comfy_workflow.txt)
+    // プリセット (名前と値)。値は、接続先なら URL、ワークフローなら JSON のパス
+    // ------------------------------------------------------------------
+    public class ComfyPreset
+    {
+        public string Name = "";
+        public string Value = "";
+
+        // 値が入っていないものは未登録
+        public bool IsEmpty { get { return Value.Length == 0; } }
+
+        // 一覧に出す文字列 (index は 0 始まり)
+        public string Label(int index)
+        {
+            return Label(index, Value);
+        }
+
+        // ワークフロー用 : パスの代わりにファイル名を出す
+        public string FileLabel(int index)
+        {
+            string file = Value;
+            try { file = Path.GetFileName(Value); } catch { }
+            return Label(index, file);
+        }
+
+        // プロンプト用 : 長い本文の代わりに先頭だけを 1 行で出す
+        public string TextLabel(int index)
+        {
+            string s = string.Join(" ", Value.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)).Trim();
+            int max = Name.Length > 0 ? 40 : 60;
+            if (s.Length > max) s = s.Substring(0, max) + "...";
+            return Label(index, s);
+        }
+
+        // 未登録に戻す
+        public void Clear()
+        {
+            Name = "";
+            Value = "";
+        }
+
+        private string Label(int index, string detail)
+        {
+            string s = Name.Length > 0 ? (detail.Length > 0 ? Name + "  (" + detail + ")" : Name)
+                     : detail.Length > 0 ? detail : "(未登録)";
+            return (index + 1) + ": " + s;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // セットのプリセット : 接続先・ワークフロー・プロンプト・秒数をまとめて呼び出す。
+    // 接続先とワークフローは番号ではなく URL とパスで覚える (プリセットの番号を入れ替えても崩れない)
+    // ------------------------------------------------------------------
+    public class ComfySet
+    {
+        public string Name = "", Url = "", Workflow = "", Prompt = "", Seconds = "";
+        public int PromptPreset = -1;   // 保存したときに選んでいたプロンプトのプリセットの番号 (0 始まり。なければ -1)
+
+        public bool IsEmpty { get { return Url.Length == 0 && Workflow.Length == 0; } }
+
+        // 一覧に出す文字列 (index は 0 始まり)
+        public string Label(int index)
+        {
+            return (index + 1) + ": " + (IsEmpty ? "(未登録)" : Name.Length > 0 ? Name : "(名前なし)");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 1 回の生成に使う設定。名前は記録と表示のためのもの
+    // ------------------------------------------------------------------
+    public class GenRequest
+    {
+        public string ConnectionName = "", Url = "", WorkflowName = "", WorkflowPath = "";
+        public string Prompt;      // null = ワークフローに書かれているまま
+        public double? Seconds;    // 同上
+    }
+
+    // 生成したファイル 1 つぶんの記録
+    public class GenRecord
+    {
+        public string Output = "", Source = "", Time = "";
+        public GenRequest Request = new GenRequest();
+    }
+
+    // ------------------------------------------------------------------
+    // どの設定で生成したかの記録 (%APPDATA%\J-Rate\comfy_history.txt、1 行に 1 件の JSON)
+    // ------------------------------------------------------------------
+    public static class ComfyHistory
+    {
+        private static readonly object Gate = new object();
+
+        public static void Add(string output, string source, GenRequest req)
+        {
+            try
+            {
+                var d = new Dictionary<string, object>();
+                d["output"] = output;
+                d["source"] = source;
+                d["time"] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                d["connection"] = req.ConnectionName;
+                d["url"] = req.Url;
+                d["workflow"] = req.WorkflowName;
+                d["workflowPath"] = req.WorkflowPath;
+                d["prompt"] = req.Prompt;
+                d["seconds"] = req.Seconds;
+                string line = ComfyVideo.NewSerializer().Serialize(d) + "\r\n";
+                string file = ComfySettings.FilePath("comfy_history.txt");
+                lock (Gate)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(file));
+                    File.AppendAllText(file, line, Encoding.UTF8);
+                }
+            }
+            catch { }
+        }
+
+        // そのファイルを生成したときの記録。同じパスの記録を探し、なければ同じファイル名の
+        // 記録 (生成後に別のフォルダへコピー・移動したもの) を使う。どちらも新しいものが優先
+        public static GenRecord Find(string outputPath)
+        {
+            try
+            {
+                string file = ComfySettings.FilePath("comfy_history.txt");
+                string[] lines;
+                lock (Gate)
+                {
+                    if (!File.Exists(file)) return null;
+                    lines = File.ReadAllLines(file, Encoding.UTF8);
+                }
+                string name = Path.GetFileName(outputPath);
+                var json = ComfyVideo.NewSerializer();
+                Dictionary<string, object> byName = null;
+                for (int i = lines.Length - 1; i >= 0; i--)
+                {
+                    // JSON の中ではパスの \ が \\ になるので、ファイル名で粗く絞ってから読む
+                    if (lines[i].IndexOf(name, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    Dictionary<string, object> d;
+                    try { d = json.DeserializeObject(lines[i]) as Dictionary<string, object>; }
+                    catch { continue; }
+                    if (d == null) continue;
+                    string output = ComfySettings.Str(d, "output");
+                    if (string.Equals(output, outputPath, StringComparison.OrdinalIgnoreCase)) return ToRecord(d);
+                    if (byName == null && string.Equals(Path.GetFileName(output), name, StringComparison.OrdinalIgnoreCase))
+                        byName = d;
+                }
+                return byName != null ? ToRecord(byName) : null;
+            }
+            catch { return null; }
+        }
+
+        private static GenRecord ToRecord(Dictionary<string, object> d)
+        {
+            var r = new GenRecord();
+            r.Output = ComfySettings.Str(d, "output");
+            r.Source = ComfySettings.Str(d, "source");
+            r.Time = ComfySettings.Str(d, "time");
+            r.Request.ConnectionName = ComfySettings.Str(d, "connection");
+            r.Request.Url = ComfySettings.Str(d, "url");
+            r.Request.WorkflowName = ComfySettings.Str(d, "workflow");
+            r.Request.WorkflowPath = ComfySettings.Str(d, "workflowPath");
+            object o;
+            if (d.TryGetValue("prompt", out o) && o != null) r.Request.Prompt = o.ToString();
+            if (d.TryGetValue("seconds", out o) && o != null) r.Request.Seconds = Convert.ToDouble(o);
+            return r;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 設定 (%APPDATA%\J-Rate\comfy_*.txt)
     // ------------------------------------------------------------------
     public static class ComfySettings
     {
         public const string DefaultUrl = "http://127.0.0.1:8188";
+        public const int PresetCount = 10;
 
-        public static string Url
+        // 接続先のプリセット (comfy_presets.txt)。いつも PresetCount 件 (未登録のものは空)
+        public static ComfyPreset[] Presets
         {
-            get
-            {
-                string s = Load("comfy_url.txt");
-                return string.IsNullOrWhiteSpace(s) ? DefaultUrl : s.Trim().TrimEnd('/');
-            }
-            set { Save("comfy_url.txt", (value ?? "").Trim().TrimEnd('/')); }
+            get { return LoadPresets("comfy_presets.txt", "comfy_url.txt", DefaultUrl); }
+            set { SavePresets("comfy_presets.txt", value); }
         }
 
-        // ComfyUI の「Export (API)」で保存したワークフロー JSON
+        // 使う接続先の番号 (0 始まり)
+        public static int ActivePreset
+        {
+            get { return LoadIndex("comfy_preset.txt"); }
+            set { Save("comfy_preset.txt", (value + 1).ToString()); }
+        }
+
+        // ワークフローのプリセット (comfy_workflows.txt)。
+        // 値は ComfyUI の「Export (API)」で保存したワークフロー JSON のパス
+        public static ComfyPreset[] Workflows
+        {
+            get { return LoadPresets("comfy_workflows.txt", "comfy_workflow.txt", ""); }
+            set { SavePresets("comfy_workflows.txt", value); }
+        }
+
+        // 使うワークフローの番号 (0 始まり)
+        public static int ActiveWorkflow
+        {
+            get { return LoadIndex("comfy_workflow_preset.txt"); }
+            set { Save("comfy_workflow_preset.txt", (value + 1).ToString()); }
+        }
+
+        // 使うワークフローのパス (未登録なら空文字)
         public static string WorkflowPath
         {
-            get { return Load("comfy_workflow.txt"); }
-            set { Save("comfy_workflow.txt", (value ?? "").Trim()); }
+            get { return Workflows[ActiveWorkflow].Value; }
         }
 
-        // 前回のプロンプトと秒数 (「動画にする」のダイアログの初期値)
+        // ファイルは 1 行に「番号 <Tab> 名前 <Tab> 値」。
+        // まだなければ、プリセットができる前の設定 (legacyFile) を 1 番に引き継ぐ
+        private static ComfyPreset[] LoadPresets(string file, string legacyFile, string legacyDefault)
+        {
+            var list = new ComfyPreset[PresetCount];
+            for (int i = 0; i < PresetCount; i++) list[i] = new ComfyPreset();
+            string s = Load(file);
+            if (s == null)
+            {
+                string old = Load(legacyFile);
+                list[0].Value = string.IsNullOrWhiteSpace(old) ? legacyDefault : old.Trim().TrimEnd('/');
+                return list;
+            }
+            foreach (string line in s.Split('\n'))
+            {
+                string[] p = line.TrimEnd('\r').Split('\t');
+                int n;
+                if (p.Length < 3 || !int.TryParse(p[0], out n) || n < 1 || n > PresetCount) continue;
+                list[n - 1].Name = p[1].Trim();
+                list[n - 1].Value = p[2].Trim().TrimEnd('/');
+            }
+            return list;
+        }
+
+        private static void SavePresets(string file, ComfyPreset[] list)
+        {
+            var sb = new StringBuilder();
+            for (int i = 0; i < PresetCount && i < list.Length; i++)
+                sb.Append(i + 1).Append('\t').Append(OneLine(list[i].Name)).Append('\t')
+                  .Append(OneLine(list[i].Value).TrimEnd('/')).Append("\r\n");
+            Save(file, sb.ToString());
+        }
+
+        private static int LoadIndex(string file)
+        {
+            int n;
+            return int.TryParse(Load(file), out n) && n >= 1 && n <= PresetCount ? n - 1 : 0;
+        }
+
+        private static string OneLine(string s)
+        {
+            return (s ?? "").Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ').Trim();
+        }
+
+        // 前回のプロンプトと秒数 (「生成する」のダイアログの初期値)
         public static string Prompt
         {
             get { return Load("comfy_prompt.txt") ?? ""; }
             set { Save("comfy_prompt.txt", (value ?? "").Trim()); }
+        }
+
+        // プロンプトのプリセット。値はプロンプトの本文 (改行があるので 1 件ずつ
+        // comfy_prompt_1.txt ～ comfy_prompt_10.txt)、名前は comfy_prompt_names.txt に「番号 <Tab> 名前」
+        public static ComfyPreset[] PromptPresets
+        {
+            get
+            {
+                var list = new ComfyPreset[PresetCount];
+                for (int i = 0; i < PresetCount; i++)
+                {
+                    list[i] = new ComfyPreset();
+                    list[i].Value = Load("comfy_prompt_" + (i + 1) + ".txt") ?? "";
+                }
+                foreach (string line in (Load("comfy_prompt_names.txt") ?? "").Split('\n'))
+                {
+                    string[] p = line.TrimEnd('\r').Split('\t');
+                    int n;
+                    if (p.Length < 2 || !int.TryParse(p[0], out n) || n < 1 || n > PresetCount) continue;
+                    list[n - 1].Name = p[1].Trim();
+                }
+                return list;
+            }
+            set
+            {
+                var names = new StringBuilder();
+                for (int i = 0; i < PresetCount && i < value.Length; i++)
+                {
+                    string file = "comfy_prompt_" + (i + 1) + ".txt";
+                    string text = (value[i].Value ?? "").Trim();
+                    if (text.Length > 0 || File.Exists(FilePath(file))) Save(file, text);
+                    names.Append(i + 1).Append('\t').Append(OneLine(value[i].Name)).Append("\r\n");
+                }
+                Save("comfy_prompt_names.txt", names.ToString());
+            }
         }
 
         public static string Seconds
@@ -50,13 +315,99 @@ namespace JRate
             set { Save("comfy_seconds.txt", (value ?? "").Trim()); }
         }
 
-        private static string FilePath(string name)
+        // 元の画像の評価を、生成したファイルに引き継ぐか (既定はオン)
+        public static bool InheritRating
+        {
+            get { return Load("comfy_inherit.txt") != "0"; }
+            set { Save("comfy_inherit.txt", value ? "1" : "0"); }
+        }
+
+        // 生成が終わったら、出来たファイルを表示するか (既定はオン。まとめて生成のときは移動しない)
+        public static bool JumpToResult
+        {
+            get { return Load("comfy_jump.txt") != "0"; }
+            set { Save("comfy_jump.txt", value ? "1" : "0"); }
+        }
+
+        // セットのプリセット (comfy_sets.txt、JSON)。いつも PresetCount 件 (未登録のものは空)
+        public static ComfySet[] Sets
+        {
+            get
+            {
+                var list = new ComfySet[PresetCount];
+                for (int i = 0; i < PresetCount; i++) list[i] = new ComfySet();
+                try
+                {
+                    var arr = ComfyVideo.NewSerializer().DeserializeObject(Load("comfy_sets.txt") ?? "") as object[];
+                    for (int i = 0; arr != null && i < arr.Length && i < PresetCount; i++)
+                    {
+                        var d = arr[i] as Dictionary<string, object>;
+                        if (d == null) continue;
+                        list[i].Name = Str(d, "name");
+                        list[i].Url = Str(d, "url");
+                        list[i].Workflow = Str(d, "workflow");
+                        list[i].Prompt = Str(d, "prompt");
+                        list[i].Seconds = Str(d, "seconds");
+                        int pp;
+                        list[i].PromptPreset = int.TryParse(Str(d, "promptPreset"), out pp) && pp >= 1 && pp <= PresetCount ? pp - 1 : -1;
+                    }
+                }
+                catch { }
+                return list;
+            }
+            set
+            {
+                var arr = new List<Dictionary<string, object>>();
+                foreach (var s in value)
+                {
+                    var d = new Dictionary<string, object>();
+                    d["name"] = s.Name;
+                    d["url"] = s.Url;
+                    d["workflow"] = s.Workflow;
+                    d["prompt"] = s.Prompt;
+                    d["seconds"] = s.Seconds;
+                    d["promptPreset"] = s.PromptPreset + 1;
+                    arr.Add(d);
+                }
+                Save("comfy_sets.txt", ComfyVideo.NewSerializer().Serialize(arr));
+            }
+        }
+
+        // 「生成する」の画面で前回選んでいたセットの番号 (0 始まり。選んでいなければ -1)
+        public static int LastSet
+        {
+            get
+            {
+                int n;
+                return int.TryParse(Load("comfy_set.txt"), out n) && n >= 1 && n <= PresetCount ? n - 1 : -1;
+            }
+            set { Save("comfy_set.txt", (value + 1).ToString()); }
+        }
+
+        // 同じく、前回選んでいたプロンプトのプリセットの番号 (0 始まり。選んでいなければ -1)
+        public static int LastPromptPreset
+        {
+            get
+            {
+                int n;
+                return int.TryParse(Load("comfy_prompt_preset.txt"), out n) && n >= 1 && n <= PresetCount ? n - 1 : -1;
+            }
+            set { Save("comfy_prompt_preset.txt", (value + 1).ToString()); }
+        }
+
+        internal static string Str(Dictionary<string, object> d, string key)
+        {
+            object o;
+            return d.TryGetValue(key, out o) && o != null ? o.ToString() : "";
+        }
+
+        internal static string FilePath(string name)
         {
             string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "J-Rate");
             return Path.Combine(dir, name);
         }
 
-        private static string Load(string name)
+        internal static string Load(string name)
         {
             try
             {
@@ -66,7 +417,7 @@ namespace JRate
             catch { return null; }
         }
 
-        private static void Save(string name, string value)
+        internal static void Save(string name, string value)
         {
             try
             {
@@ -79,23 +430,27 @@ namespace JRate
     }
 
     // ------------------------------------------------------------------
-    // ComfyUI の HTTP API を使った動画生成
+    // ComfyUI の HTTP API を使った生成 (画像 → 動画、画像 → 画像)
     //   1. POST /upload/image  で画像を送る
     //   2. ワークフローの LoadImage ノードの画像名を差し替え、シードをランダムにする
     //      (プロンプトと秒数も、指定があれば差し替える)
     //   3. POST /prompt        で実行を依頼
     //   4. GET  /history/{id}  で完了を待つ (待ち中は GET /queue で順番を表示)
-    //   5. GET  /view          で出来た動画を受け取り、元画像と同じフォルダに保存
+    //   5. GET  /view          で出来たファイルを受け取り、元画像と同じフォルダに保存
     // ------------------------------------------------------------------
     public static class ComfyVideo
     {
         private static readonly string[] VideoExts = { ".mp4", ".m4v", ".webm", ".mov", ".mkv", ".gif", ".webp" };
+        private static readonly string[] ImageExts = { ".png", ".jpg", ".jpeg" };
         private static readonly Random Rng = new Random();
 
         // prompt / seconds が null のときはワークフローに書かれている値のまま。
-        // 戻り値 : 保存した動画のパス。失敗したときは例外 (メッセージは日本語)。
-        public static string Generate(string imagePath, string baseUrl, string workflowPath,
-                                      string prompt, double? seconds, Action<string> progress)
+        // 戻り値 : 保存したファイルのパス (動画なら 1 つ、画像なら出力された枚数ぶん)。
+        //          失敗したときは例外 (メッセージは日本語)。
+        //          cancel で止められたときは ComfyUI 側の実行も取り消して OperationCanceledException。
+        public static List<string> Generate(string imagePath, string baseUrl, string workflowPath,
+                                            string prompt, double? seconds, Action<string> progress,
+                                            CancellationToken cancel)
         {
             if (progress == null) progress = delegate { };
             baseUrl = (baseUrl ?? ComfySettings.DefaultUrl).TrimEnd('/');
@@ -108,6 +463,7 @@ namespace JRate
                 throw new Exception("ワークフローに「Load Image」(LoadImage) ノードがありません。\n" + workflowPath);
 
             // 画像のアップロード
+            cancel.ThrowIfCancellationRequested();
             progress("ComfyUI へ画像を送信中...");
             string uploadName = Upload(baseUrl, imagePath, json);
 
@@ -118,6 +474,7 @@ namespace JRate
             if (seconds != null) SetDuration(workflow, seconds.Value);
 
             // 実行を依頼
+            cancel.ThrowIfCancellationRequested();
             progress("ComfyUI に実行を依頼中...");
             var body = new Dictionary<string, object>();
             body["prompt"] = workflow;
@@ -136,7 +493,11 @@ namespace JRate
             Dictionary<string, object> entry = null;
             while (true)
             {
-                Thread.Sleep(2000);
+                if (cancel.WaitHandle.WaitOne(2000))
+                {
+                    CancelPrompt(baseUrl, json, promptId);
+                    throw new OperationCanceledException();
+                }
                 try
                 {
                     string h = Request(baseUrl + "/history/" + Uri.EscapeDataString(promptId), "GET", null, null);
@@ -161,32 +522,66 @@ namespace JRate
             CheckStatus(entry);
 
             // 出力ファイルを探して保存
-            var output = FindVideoOutput(entry);
-            if (output == null)
-                throw new Exception("ワークフローの出力に動画ファイルが見つかりません。\n" +
-                                    "Video Combine / Save Video などの保存ノードがあるか確認してください。");
+            var outputs = FindOutputs(entry);
+            if (outputs.Count == 0)
+                throw new Exception("ワークフローの出力に動画や画像のファイルが見つかりません。\n" +
+                                    "Save Video / Save Image などの保存ノードがあるか確認してください。");
 
-            progress("動画を受け取り中...");
-            string dest = UniquePath(Path.Combine(Path.GetDirectoryName(imagePath),
-                                     Path.GetFileNameWithoutExtension(imagePath) + "_video" + Path.GetExtension(output.Filename)));
-            string url = baseUrl + "/view?filename=" + Uri.EscapeDataString(output.Filename)
-                       + "&subfolder=" + Uri.EscapeDataString(output.Subfolder)
-                       + "&type=" + Uri.EscapeDataString(output.Type);
-            string temp = dest + ".part";
+            // 動画は「(元の名前)_video」、画像は「(元の名前)_i2i」で保存する
+            var saved = new List<string>();
+            foreach (var output in outputs)
+            {
+                cancel.ThrowIfCancellationRequested();
+                progress(outputs.Count > 1 ? "結果を受け取り中... (" + (saved.Count + 1) + " / " + outputs.Count + ")"
+                                           : "結果を受け取り中...");
+                string dest = UniquePath(Path.Combine(Path.GetDirectoryName(imagePath),
+                                         Path.GetFileNameWithoutExtension(imagePath) + (output.IsVideo ? "_video" : "_i2i") +
+                                         Path.GetExtension(output.Filename)));
+                string url = baseUrl + "/view?filename=" + Uri.EscapeDataString(output.Filename)
+                           + "&subfolder=" + Uri.EscapeDataString(output.Subfolder)
+                           + "&type=" + Uri.EscapeDataString(output.Type);
+                string temp = dest + ".part";
+                try
+                {
+                    using (var wc = new WebClient())
+                    {
+                        wc.Proxy = null;
+                        wc.DownloadFile(url, temp);
+                    }
+                    File.Move(temp, dest);
+                }
+                finally
+                {
+                    try { if (File.Exists(temp)) File.Delete(temp); } catch { }
+                }
+                saved.Add(dest);
+            }
+            return saved;
+        }
+
+        // ComfyUI 側の実行を取り消す。順番待ちなら待ち行列から外し、実行中なら中断する
+        private static void CancelPrompt(string baseUrl, JavaScriptSerializer json, string promptId)
+        {
             try
             {
-                using (var wc = new WebClient())
-                {
-                    wc.Proxy = null;
-                    wc.DownloadFile(url, temp);
-                }
-                File.Move(temp, dest);
+                var del = new Dictionary<string, object>();
+                del["delete"] = new[] { promptId };
+                Request(baseUrl + "/queue", "POST", "application/json", Encoding.UTF8.GetBytes(json.Serialize(del)));
             }
-            finally
+            catch { }
+            try
             {
-                try { if (File.Exists(temp)) File.Delete(temp); } catch { }
+                // 中断は「今実行しているもの」に効くので、自分の番のときだけ送る
+                var q = json.DeserializeObject(Request(baseUrl + "/queue", "GET", null, null)) as Dictionary<string, object>;
+                object running;
+                if (q != null && q.TryGetValue("queue_running", out running) && ContainsPrompt(running, promptId) >= 0)
+                {
+                    var body = new Dictionary<string, object>();
+                    body["prompt_id"] = promptId;
+                    Request(baseUrl + "/interrupt", "POST", "application/json", Encoding.UTF8.GetBytes(json.Serialize(body)));
+                }
             }
-            return dest;
+            catch { }
         }
 
         // ComfyUI が動いているか確かめる。戻り値はエラーメッセージ (正常なら null)
@@ -482,17 +877,20 @@ namespace JRate
         private class OutputFile
         {
             public string Filename, Subfolder, Type;
+            public bool IsVideo;
         }
 
-        // 出力ノードの結果 (gifs / videos / images など) から動画ファイルを 1 つ選ぶ。mp4 を優先
-        private static OutputFile FindVideoOutput(Dictionary<string, object> entry)
+        // 出力ノードの結果 (gifs / videos / images など) から受け取るファイルを選ぶ。
+        //   動画があれば 1 つだけ (mp4 を優先)。
+        //   なければ画像をすべて (保存ノードのものがあればそれだけ、なければプレビューのもの)。
+        private static List<OutputFile> FindOutputs(Dictionary<string, object> entry)
         {
-            object o;
-            if (!entry.TryGetValue("outputs", out o)) return null;
-            var outputs = o as Dictionary<string, object>;
-            if (outputs == null) return null;
-
             var found = new List<OutputFile>();
+            object o;
+            if (!entry.TryGetValue("outputs", out o)) return found;
+            var outputs = o as Dictionary<string, object>;
+            if (outputs == null) return found;
+
             foreach (var nodeOut in outputs.Values.OfType<Dictionary<string, object>>())
             {
                 foreach (var kv in nodeOut)
@@ -504,22 +902,30 @@ namespace JRate
                         object fn, sub, type;
                         if (!f.TryGetValue("filename", out fn) || fn == null) continue;
                         string ext = Path.GetExtension(fn.ToString()).ToLowerInvariant();
-                        if (Array.IndexOf(VideoExts, ext) < 0) continue;
+                        bool video = Array.IndexOf(VideoExts, ext) >= 0;
+                        if (!video && Array.IndexOf(ImageExts, ext) < 0) continue;
                         f.TryGetValue("subfolder", out sub);
                         f.TryGetValue("type", out type);
                         found.Add(new OutputFile
                         {
                             Filename = fn.ToString(),
                             Subfolder = sub != null ? sub.ToString() : "",
-                            Type = type != null ? type.ToString() : "output"
+                            Type = type != null ? type.ToString() : "output",
+                            IsVideo = video
                         });
                     }
                 }
             }
-            // 優先順位 : output フォルダ > temp、拡張子は VideoExts の並び順 (mp4 が先頭)
-            return found.OrderBy(f => f.Type == "output" ? 0 : 1)
-                        .ThenBy(f => Array.IndexOf(VideoExts, Path.GetExtension(f.Filename).ToLowerInvariant()))
-                        .FirstOrDefault();
+
+            // 動画の優先順位 : output フォルダ > temp、拡張子は VideoExts の並び順 (mp4 が先頭)
+            var best = found.Where(f => f.IsVideo)
+                            .OrderBy(f => f.Type == "output" ? 0 : 1)
+                            .ThenBy(f => Array.IndexOf(VideoExts, Path.GetExtension(f.Filename).ToLowerInvariant()))
+                            .FirstOrDefault();
+            if (best != null) return new List<OutputFile> { best };
+
+            var kept = found.Where(f => f.Type == "output").ToList();
+            return kept.Count > 0 ? kept : found;
         }
 
         private static string Request(string url, string method, string contentType, byte[] body)

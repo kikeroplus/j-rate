@@ -948,7 +948,7 @@ namespace JRate
 
         private const int ThumbSize = 192;
         private const int CacheLimit = 8;
-        private const string HelpText = "1〜5: 評価 / 0: 評価解除 / Del: ごみ箱へ削除 / ← →・ホイール: 移動 / Ctrl+ホイール: 拡大縮小 / Space: 動画の再生・一時停止 / Home End: 先頭・末尾 / Ctrl+O: フォルダを開く / Ctrl+G: グリッド一覧";
+        private const string HelpText = "1〜5: 評価 / 0: 評価解除 / Del: ごみ箱へ削除 / ← →・ホイール: 移動 / Ctrl+ホイール: 拡大縮小 / Space: 動画の再生・一時停止 / Home End: 先頭・末尾 / Ctrl+O: フォルダを開く / Ctrl+G: グリッド一覧 / Ctrl+J: 生成ジョブ";
 
         private readonly ObservableCollection<ImageItem> items = new ObservableCollection<ImageItem>();
         private readonly ICollectionView view;
@@ -966,6 +966,7 @@ namespace JRate
         private Border ratingBadge, infoBadge;
         private ToggleButton[] filterButtons;
         private ToggleButton modeAtLeast, modeAtMost, modeOnly;
+        private ToggleButton typeImage, typeVideo;
         private CheckBox autoNext;
         private Button copyButton, moveButton;
         private FrameworkElement toolbar, loadPanel;
@@ -1021,6 +1022,7 @@ namespace JRate
 
         private string currentFolder;
         private int filterValue;               // 0 = フィルターなし
+        private int typeFilter;                // 0 = すべて, 1 = 画像のみ, 2 = 動画のみ
         private FilterMode filterMode = FilterMode.Only;
         private SortMode sortMode = SortMode.NameAsc;
         private ComboBox sortBox;
@@ -1090,7 +1092,14 @@ namespace JRate
             modeAtLeast.Click += delegate { SetMode(FilterMode.AtLeast); };
             modeAtMost.Click += delegate { SetMode(FilterMode.AtMost); };
             modeOnly.Click += delegate { SetMode(FilterMode.Only); };
-            ((Button)root.FindName("FilterAll")).Click += delegate { filterValue = 0; ApplyFilter(); };
+            typeImage = (ToggleButton)root.FindName("TypeImage");
+            typeVideo = (ToggleButton)root.FindName("TypeVideo");
+            // 押してあるほうをもう一度押すと解除
+            typeImage.Click += delegate { typeFilter = typeFilter == 1 ? 0 : 1; ApplyFilter(); };
+            typeVideo.Click += delegate { typeFilter = typeFilter == 2 ? 0 : 2; ApplyFilter(); };
+            ((Button)root.FindName("FilterAll")).Click += delegate { filterValue = 0; typeFilter = 0; ApplyFilter(); };
+            jobsButton = (Button)root.FindName("JobsButton");
+            jobsButton.Click += delegate { ShowJobs(); };
             ((Button)root.FindName("OpenButton")).Click += delegate { BrowseFolder(); };
             ((Button)root.FindName("GridButton")).Click += delegate { ShowGrid(); };
             copyButton = (Button)root.FindName("CopyButton");
@@ -1137,6 +1146,17 @@ namespace JRate
             {
                 var src = PresentationSource.FromVisual(this) as HwndSource;
                 if (src != null) src.CompositionTarget.RenderMode = RenderMode.SoftwareOnly;
+            };
+
+            // 生成の途中で閉じると結果を受け取れないので確かめる
+            Closing += delegate(object s, CancelEventArgs e)
+            {
+                int active = jobs.Count(j => j.IsActive);
+                if (active > 0 &&
+                    MessageBox.Show(this, "生成中のジョブが " + active + " 件あります。終了しますか？\n\n" +
+                                          "終了すると、出来たファイルを受け取れません (ComfyUI 側で実行中のものは止まりません)。",
+                                    "J-Rate", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
+                    e.Cancel = true;
             };
 
             Loaded += delegate { OpenInitial(args); };
@@ -1339,15 +1359,28 @@ namespace JRate
             menu.Items.Add(explorer);
             menu.Items.Add(new Separator());
 
-            // ComfyUI で動画を生成 (画像のときだけ)
-            var makeVideo = new MenuItem { Header = "動画にする (ComfyUI)" };
+            // ComfyUI で動画や画像を生成 (画像のときだけ)
+            var makeVideo = new MenuItem { Header = "生成する (ComfyUI)" };
             makeVideo.Click += delegate
             {
                 var it = Current;
-                if (it != null && !it.IsVideo) MakeVideo(it);
+                if (it != null && !it.IsVideo) Generate(new List<string> { it.Path }, null);
             };
             menu.Items.Add(makeVideo);
-            var comfySettings = new MenuItem { Header = "動画生成の設定..." };
+            var makeAll = new MenuItem { Header = "表示中の画像をまとめて生成する..." };
+            makeAll.Click += delegate { Generate(ShownImages(), null); };
+            menu.Items.Add(makeAll);
+            var genInfo = new MenuItem { Header = "生成時の設定..." };
+            genInfo.Click += delegate
+            {
+                var it = Current;
+                if (it != null) ShowGenInfo(it);
+            };
+            menu.Items.Add(genInfo);
+            var showJobs = new MenuItem { Header = "生成ジョブの一覧...", InputGestureText = "Ctrl+J" };
+            showJobs.Click += delegate { ShowJobs(); };
+            menu.Items.Add(showJobs);
+            var comfySettings = new MenuItem { Header = "生成の設定..." };
             comfySettings.Click += delegate { ShowComfySettings(); };
             menu.Items.Add(comfySettings);
             menu.Items.Add(new Separator());
@@ -1377,6 +1410,10 @@ namespace JRate
                 for (int i = 1; i <= 5; i++) ratingItems[i].IsChecked = it != null && it.Rating == i;
                 clear.IsEnabled = it != null && it.Rating > 0;
                 makeVideo.IsEnabled = it != null && !it.IsVideo;
+                int shown = ShownImages().Count;
+                makeAll.Header = "表示中の画像をまとめて生成する (" + shown + " 枚)...";
+                makeAll.IsEnabled = shown > 0;
+                genInfo.IsEnabled = it != null && ComfyHistory.Find(it.Path) != null;
             };
 
             // 画像がないとき・処理中はメニューを出さない
@@ -1392,12 +1429,24 @@ namespace JRate
             thumbList.ContextMenuOpening += guard;
         }
 
-        // ---------------- 動画にする (ComfyUI) ----------------
+        // ---------------- 生成する (ComfyUI) ----------------
 
-        private int videoJobs;   // 生成中の件数
+        private const int MaxRunningJobs = 2;   // 同じ接続先に同時に依頼する件数 (残りはこちらで待機させる)
+        private readonly ObservableCollection<GenJob> jobs = new ObservableCollection<GenJob>();
+        private JobWindow jobWindow;
+        private Button jobsButton;
 
-        private async void MakeVideo(ImageItem item)
+        // 表示中の画像 (動画は除く) を表示順に
+        private List<string> ShownImages()
         {
+            return thumbList.Items.Cast<ImageItem>().Where(x => !x.IsVideo).Select(x => x.Path).ToList();
+        }
+
+        // 設定を聞いてから、sources の画像をジョブに登録する。
+        // prefill は欄の初期値 (null なら前回の値)
+        private void Generate(List<string> sources, GenRequest prefill)
+        {
+            if (sources.Count == 0) return;
             string workflow = ComfySettings.WorkflowPath;
             if (string.IsNullOrEmpty(workflow) || !File.Exists(workflow))
             {
@@ -1406,73 +1455,290 @@ namespace JRate
                 workflow = ComfySettings.WorkflowPath;
                 if (string.IsNullOrEmpty(workflow) || !File.Exists(workflow)) return;
             }
-            string url = ComfySettings.Url;
-            string src = item.Path;
-            string name = item.FileName;
 
-            // プロンプトと秒数を聞く
-            string prompt = null;
-            double? seconds = null;
+            // 接続先・ワークフロー・プロンプト・秒数・回数を聞く
+            GenRequest request;
+            int repeat;
             try
             {
-                var wf = ComfyVideo.LoadWorkflow(ComfyVideo.NewSerializer(), workflow);
-                var dlg = new ComfyPromptDialog(name, ComfyVideo.HasPrompt(wf), ComfyVideo.GetDuration(wf),
-                                                ComfyVideo.DurationIsInteger(wf));
+                string title = sources.Count == 1
+                    ? "生成する - " + System.IO.Path.GetFileName(sources[0])
+                    : "まとめて生成する - 表示中の画像 " + sources.Count + " 枚";
+                var dlg = new ComfyPromptDialog(title, sources.Count, prefill);
                 dlg.Owner = gridWindow != null && gridWindow.IsActive ? (Window)gridWindow : this;
                 if (dlg.ShowDialog() != true) return;
-                prompt = dlg.Prompt;
-                seconds = dlg.Seconds;
+                request = dlg.Request;
+                repeat = dlg.Repeat;
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this, ex.Message, "動画にする - J-Rate", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show(this, ex.Message, "生成する - J-Rate", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
-            videoJobs++;
-            bool done = false;
+            int total = sources.Count * repeat;
+            if (total > 30 &&
+                MessageBox.Show(this, "合計 " + total + " 件の生成を登録します。よろしいですか？", "生成する - J-Rate",
+                                MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
+                return;
+
+            bool batch = total > 1;
+            foreach (string src in sources)
+                for (int i = 0; i < repeat; i++) jobs.Add(new GenJob(src, request, batch));
+            if (batch) ShowJobs();
+            StartJobs();
+        }
+
+        // 待機中のジョブを、接続先ごとに MaxRunningJobs 件まで実行に移す
+        private void StartJobs()
+        {
+            foreach (var job in jobs.Where(j => j.State == GenState.Waiting).ToList())
+            {
+                string url = job.Request.Url;
+                if (jobs.Count(j => j.State == GenState.Running && j.Request.Url == url) >= MaxRunningJobs) continue;
+                RunJob(job);
+            }
+            UpdateJobCount();
+        }
+
+        private async void RunJob(GenJob job)
+        {
+            job.State = GenState.Running;
+            job.Status = "準備中...";
+            ShowJobStatus(job);
+
+            var request = job.Request;
+            var token = job.Cancel.Token;
             var dispatcher = Dispatcher;
             Action<string> report = msg => dispatcher.BeginInvoke(new Action(() =>
             {
-                if (done) return;   // 完了後に届いた古い進捗は無視
-                statusText.Text = "動画生成 " + name + " : " + msg +
-                                  (videoJobs > 1 ? "  (処理中 " + videoJobs + " 件)" : "");
+                if (job.State != GenState.Running) return;   // 完了後に届いた古い進捗は無視
+                job.Status = job.Cancel.IsCancellationRequested ? "キャンセル中..." : msg;
+                ShowJobStatus(job);
             }));
-            report("準備中...");
 
-            string result = null;
+            List<string> result = null;
             Exception error = null;
             try
             {
-                result = await Task.Run(() => ComfyVideo.Generate(src, url, workflow, prompt, seconds, report));
+                result = await Task.Run(() =>
+                {
+                    var files = ComfyVideo.Generate(job.Source, request.Url, request.WorkflowPath,
+                                                    request.Prompt, request.Seconds, report, token);
+                    foreach (string f in files) ComfyHistory.Add(f, job.Source, request);   // どの設定で作ったかを残す
+                    return files;
+                });
             }
             catch (Exception ex) { error = ex; }
-            done = true;
-            videoJobs--;
-            string rest = videoJobs > 0 ? "  (処理中 " + videoJobs + " 件)" : "";
 
-            if (error != null)
+            bool failed = false;
+            if (error is OperationCanceledException || (error != null && job.Cancel.IsCancellationRequested))
             {
-                statusText.Text = "動画を作れませんでした: " + name + rest;
-                string text = error is System.Net.WebException
-                    ? "ComfyUI に接続できません (" + url + ")。\nComfyUI が起動しているか確認してください。\n\n" + error.Message
-                    : error.Message;
-                MessageBox.Show(this, name + "\n\n" + text, "動画にする - J-Rate", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
+                job.State = GenState.Canceled;
+                job.Status = "キャンセルしました";
+                statusText.Text = "生成をキャンセルしました: " + job.FileName;
             }
-            statusText.Text = "動画を作成しました: " + System.IO.Path.GetFileName(result) + rest;
-            AddGeneratedFile(result);
+            else if (error != null)
+            {
+                failed = true;
+                job.State = GenState.Failed;
+                job.Status = error is System.Net.WebException
+                    ? "ComfyUI に接続できません (" + request.Url + ")。" + error.Message
+                    : error.Message;
+                statusText.Text = "生成できませんでした: " + job.FileName;
+            }
+            else
+            {
+                // 元の画像の評価を引き継ぐ (一覧に加える前に書き込む。再生が始まるとファイルがロックされるため)
+                int stars = ComfySettings.InheritRating ? SourceRating(job.Source) : 0;
+                if (stars > 0)
+                    foreach (string path in result)
+                        if (!WriteRatingKeepTime(path, stars)) stars = 0;
+
+                job.Outputs = result;
+                job.State = GenState.Done;
+                job.Status = "生成しました: " + System.IO.Path.GetFileName(result[0]) +
+                             (result.Count > 1 ? " ほか " + (result.Count - 1) + " 件" : "");
+                statusText.Text = job.Status;
+
+                ImageItem first = null;
+                foreach (string path in result)
+                {
+                    var it = AddGeneratedFile(path, stars);
+                    if (first == null) first = it;
+                }
+                // 完成したファイルへ移動 (まとめて生成のときは、次々に切り替わってしまうので移動しない)
+                if (!job.Batch && ComfySettings.JumpToResult && first != null && !busy && thumbList.Items.Contains(first))
+                    thumbList.SelectedItem = first;
+            }
+
+            StartJobs();
+            statusText.Text += JobCounts();
+            if (!jobs.Any(j => j.IsActive)) NotifyJobsFinished();
+
+            if (failed && !job.Batch)
+            {
+                string text = error is System.Net.WebException
+                    ? "ComfyUI に接続できません (" + request.Url + ")。\nComfyUI が起動しているか確認してください。\n\n" + error.Message
+                    : error.Message;
+                MessageBox.Show(this, job.FileName + "\n\n" + text, "生成する - J-Rate", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
         }
 
-        // 出来た動画が今開いているフォルダのものなら一覧に加える
-        private void AddGeneratedFile(string path)
+        // 待機中ならその場で取り消し、実行中なら ComfyUI 側の実行も止める
+        private void CancelJob(GenJob job)
         {
-            if (currentFolder == null || !FolderNode.SamePath(System.IO.Path.GetDirectoryName(path), currentFolder)) return;
-            if (!IsSupportedImage(path) || !File.Exists(path)) return;
-            if (items.Any(x => string.Equals(x.Path, path, StringComparison.OrdinalIgnoreCase))) return;
+            if (job.State == GenState.Waiting)
+            {
+                job.State = GenState.Canceled;
+                job.Status = "キャンセルしました";
+                UpdateJobCount();
+            }
+            else if (job.State == GenState.Running && !job.Cancel.IsCancellationRequested)
+            {
+                job.Status = "キャンセル中...";
+                job.Cancel.Cancel();
+            }
+        }
+
+        private void ShowJobStatus(GenJob job)
+        {
+            statusText.Text = "生成 " + job.FileName + " : " + job.Status + JobCounts();
+        }
+
+        // 複数のジョブが残っているときだけ件数を添える
+        private string JobCounts()
+        {
+            int running = jobs.Count(j => j.State == GenState.Running);
+            int waiting = jobs.Count(j => j.State == GenState.Waiting);
+            if (running + waiting <= 1) return "";
+            return "  (実行中 " + running + " 件" + (waiting > 0 ? "・待機 " + waiting + " 件" : "") + ")";
+        }
+
+        private void UpdateJobCount()
+        {
+            int active = jobs.Count(j => j.IsActive);
+            jobsButton.Content = active > 0 ? "生成ジョブ (" + active + ")" : "生成ジョブ";
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FLASHWINFO
+        {
+            public uint cbSize;
+            public IntPtr hwnd;
+            public uint dwFlags, uCount, dwTimeout;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern bool FlashWindowEx(ref FLASHWINFO info);
+
+        // すべてのジョブが終わった。ほかの作業をしているときはタスクバーの点滅と音で知らせる
+        private void NotifyJobsFinished()
+        {
+            if (IsActive || (gridWindow != null && gridWindow.IsActive) || (jobWindow != null && jobWindow.IsActive)) return;
+            try
+            {
+                var info = new FLASHWINFO();
+                info.cbSize = (uint)Marshal.SizeOf(typeof(FLASHWINFO));
+                info.hwnd = new WindowInteropHelper(this).Handle;
+                info.dwFlags = 3 | 12;   // FLASHW_ALL | FLASHW_TIMERNOFG (手前に来るまで点滅)
+                info.uCount = uint.MaxValue;
+                FlashWindowEx(ref info);
+                System.Media.SystemSounds.Asterisk.Play();
+            }
+            catch { }
+        }
+
+        private void ShowJobs()
+        {
+            if (jobWindow != null)
+            {
+                jobWindow.Activate();
+                return;
+            }
+            jobWindow = new JobWindow(jobs, CancelJob, ShowJobResult);
+            jobWindow.Owner = this;
+            jobWindow.Closed += delegate { jobWindow = null; };
+            jobWindow.Show();
+        }
+
+        // ジョブの結果 (最初のファイル) をメイン画面に表示する。別のフォルダならそのフォルダを開く
+        private void ShowJobResult(GenJob job)
+        {
+            string path = job.Outputs.FirstOrDefault(File.Exists);
+            if (path == null)
+            {
+                statusText.Text = "ファイルが見つかりません: " + System.IO.Path.GetFileName(job.Outputs[0]);
+                return;
+            }
+            if (busy) return;
+            if (currentFolder == null || !FolderNode.SamePath(System.IO.Path.GetDirectoryName(path), currentFolder))
+            {
+                OpenPath(path);
+                Activate();
+                return;
+            }
+            var it = items.FirstOrDefault(x => string.Equals(x.Path, path, StringComparison.OrdinalIgnoreCase))
+                     ?? AddGeneratedFile(path, 0);
+            if (it != null && thumbList.Items.Contains(it))
+            {
+                thumbList.SelectedItem = it;
+                Activate();
+            }
+            else statusText.Text = "今のフィルターでは表示されません: " + System.IO.Path.GetFileName(path);
+        }
+
+        // 元の画像の今の評価 (生成している間に付けた評価も引き継げるよう、終わった時点で調べる)
+        private int SourceRating(string path)
+        {
+            var it = items.FirstOrDefault(x => string.Equals(x.Path, path, StringComparison.OrdinalIgnoreCase));
+            if (it != null) return it.Rating;
+            try { return ImageLoader.ReadRating(path); }
+            catch { return 0; }
+        }
+
+        // 評価を書き込む。更新日時は変えない
+        private static bool WriteRatingKeepTime(string path, int stars)
+        {
+            try
+            {
+                DateTime modified = File.GetLastWriteTimeUtc(path);
+                ShellRating.Write(path, stars);
+                try { File.SetLastWriteTimeUtc(path, modified); }
+                catch { }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // 右クリックした (生成で出来た) ファイルの、生成時の設定を見せる
+        private void ShowGenInfo(ImageItem item)
+        {
+            var record = ComfyHistory.Find(item.Path);
+            if (record == null)
+            {
+                MessageBox.Show(this, item.FileName + "\n\nこのファイルを生成したときの記録はありません。", "生成時の設定 - J-Rate",
+                                MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            var dlg = new GenInfoDialog(item.FileName, record);
+            dlg.Owner = gridWindow != null && gridWindow.IsActive ? (Window)gridWindow : this;
+            if (dlg.ShowDialog() == true && dlg.Regenerate)
+                Generate(new List<string> { record.Source }, record.Request);
+        }
+
+        // 出来たファイルが今開いているフォルダのものなら一覧に加える。rating は書き込み済みの評価
+        private ImageItem AddGeneratedFile(string path, int rating)
+        {
+            if (currentFolder == null || !FolderNode.SamePath(System.IO.Path.GetDirectoryName(path), currentFolder)) return null;
+            if (!IsSupportedImage(path) || !File.Exists(path)) return null;
+            var old = items.FirstOrDefault(x => string.Equals(x.Path, path, StringComparison.OrdinalIgnoreCase));
+            if (old != null) return old;
 
             var it = new ImageItem(path, File.GetLastWriteTimeUtc(path));
+            if (rating > 0) it.Rating = rating;
             items.Add(it);   // 並べ替え (CustomSort) とフィルターは view が反映する
+            UpdateInfo();
             Task.Run(() =>
             {
                 try { return ShellThumbnail.Load(path, ThumbSize); }
@@ -1481,6 +1747,7 @@ namespace JRate
             {
                 if (t.Result != null) it.Thumbnail = t.Result;
             }, TaskScheduler.FromCurrentSynchronizationContext());
+            return it;
         }
 
         private bool ShowComfySettings()
@@ -1804,6 +2071,8 @@ namespace JRate
                 string m = filterMode == FilterMode.Only ? "のみ" : filterMode == FilterMode.AtLeast ? "以上" : "以下";
                 filter = "フィルター: ★" + filterValue + " " + m;
             }
+            if (typeFilter != 0)
+                filter = (filterValue > 0 ? filter + "・" : "フィルター: ") + (typeFilter == 1 ? "画像のみ" : "動画のみ");
             countText.Text = filter + "    表示 " + thumbList.Items.Count + " / 全 " + items.Count + " 枚";
 
             // コピー / 移動は ★ フィルターが有効で、表示中の画像があるときだけ
@@ -1817,6 +2086,8 @@ namespace JRate
 
         private bool Matches(ImageItem it)
         {
+            if (typeFilter == 1 && it.IsVideo) return false;
+            if (typeFilter == 2 && !it.IsVideo) return false;
             if (filterValue == 0) return true;
             switch (filterMode)
             {
@@ -1845,6 +2116,8 @@ namespace JRate
             modeOnly.IsChecked = filterMode == FilterMode.Only;
             modeAtLeast.IsChecked = filterMode == FilterMode.AtLeast;
             modeAtMost.IsChecked = filterMode == FilterMode.AtMost;
+            typeImage.IsChecked = typeFilter == 1;
+            typeVideo.IsChecked = typeFilter == 2;
         }
 
         // フィルターを再適用。表示中の画像が条件から外れたら、同じ位置 (=次) の画像を選ぶ。
@@ -2030,6 +2303,12 @@ namespace JRate
             if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.G)
             {
                 ShowGrid();
+                e.Handled = true;
+                return;
+            }
+            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.J)
+            {
+                ShowJobs();
                 e.Handled = true;
                 return;
             }
@@ -2936,8 +3215,9 @@ namespace JRate
         private string FilterDescription()
         {
             if (filterValue == 0) return "";
-            if (filterMode == FilterMode.Only) return "★" + filterValue;
-            return "★" + filterValue + (filterMode == FilterMode.AtLeast ? "以上" : "以下");
+            string type = typeFilter == 1 ? " 画像のみ" : typeFilter == 2 ? " 動画のみ" : "";
+            if (filterMode == FilterMode.Only) return "★" + filterValue + type;
+            return "★" + filterValue + (filterMode == FilterMode.AtLeast ? "以上" : "以下") + type;
         }
 
         private async void Transfer(bool move)
@@ -3281,50 +3561,178 @@ namespace JRate
         }
     }
     // ------------------------------------------------------------------
-    // 動画生成 (ComfyUI) の設定ダイアログ
+    // 生成 (ComfyUI) の設定ダイアログ
     // ------------------------------------------------------------------
     public class ComfySettingsDialog : Window
     {
-        private readonly TextBox urlBox, workflowBox;
+        // タブ 1 枚分 : プリセットの一覧、名前と値の欄、「プリセットを保存」「削除」
+        private class PresetTab
+        {
+            public readonly ComfyPreset[] List;
+            public readonly StackPanel Panel = new StackPanel { Margin = new Thickness(12, 12, 12, 4) };
+            public readonly ComboBox Box = new ComboBox { Margin = new Thickness(0, 4, 0, 12) };
+            public readonly TextBox NameBox = new TextBox { Padding = new Thickness(2, 3, 2, 3), Margin = new Thickness(0, 4, 0, 12) };
+            public readonly TextBox ValueBox;
+            public readonly Button SaveButton = new Button { Content = "プリセットを保存", Padding = new Thickness(12, 2, 12, 2) };
+            public readonly Button DeleteButton = new Button { Content = "削除", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0) };
+            public int Shown = -1;   // 欄に出しているプリセットの番号
+
+            private readonly Func<ComfyPreset, int, string> label;
+            private readonly Func<string, string> normalize;
+            private readonly Action<ComfyPreset[]> save;
+            private bool relabeling;   // 一覧の表示をコードから書き換えている間
+
+            public PresetTab(ComfyPreset[] list, string caption, string nameCaption, string valueCaption,
+                             TextBox valueBox, Button sideButton, Func<ComfyPreset, int, string> label,
+                             Func<string, string> normalize, Action<ComfyPreset[]> save)
+            {
+                List = list;
+                ValueBox = valueBox;
+                this.label = label;
+                this.normalize = normalize;
+                this.save = save;
+
+                Panel.Children.Add(new TextBlock { Text = caption });
+                for (int i = 0; i < list.Length; i++) Box.Items.Add(label(list[i], i));
+                Panel.Children.Add(Box);
+
+                Panel.Children.Add(new TextBlock { Text = nameCaption });
+                Panel.Children.Add(NameBox);
+
+                Panel.Children.Add(new TextBlock { Text = valueCaption });
+                var row = new DockPanel { Margin = new Thickness(0, 4, 0, 12) };
+                if (sideButton != null)
+                {
+                    DockPanel.SetDock(sideButton, Dock.Right);
+                    row.Children.Add(sideButton);
+                }
+                row.Children.Add(valueBox);
+                Panel.Children.Add(row);
+
+                var buttons = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    Margin = new Thickness(0, 0, 0, 8)
+                };
+                buttons.Children.Add(SaveButton);
+                buttons.Children.Add(DeleteButton);
+                Panel.Children.Add(buttons);
+
+                // 番号を選ぶと、その名前と値を欄に出す (保存していない入力は捨てる)
+                Box.SelectionChanged += delegate
+                {
+                    if (relabeling || Box.SelectedIndex < 0) return;
+                    Shown = Box.SelectedIndex;
+                    NameBox.Text = List[Shown].Name;
+                    ValueBox.Text = List[Shown].Value;
+                };
+            }
+
+            // 欄に入っている値
+            public string Value { get { return normalize(ValueBox.Text); } }
+
+            // 欄の名前と値を、選んでいる番号のプリセットとして保存する (キャンセルしても残る)
+            public void Store()
+            {
+                List[Shown].Name = NameBox.Text.Trim();
+                List[Shown].Value = Value;
+                Saved();
+            }
+
+            // 選んでいる番号を未登録に戻す
+            public void Delete()
+            {
+                List[Shown].Clear();
+                NameBox.Text = "";
+                ValueBox.Text = "";
+                Saved();
+            }
+
+            private void Saved()
+            {
+                relabeling = true;
+                Box.Items[Shown] = label(List[Shown], Shown);
+                Box.SelectedIndex = Shown;
+                relabeling = false;
+                save(List);
+            }
+        }
+
+        private readonly PresetTab connection, workflow, prompt;
         private readonly TextBlock resultText;
 
         public ComfySettingsDialog()
         {
-            Title = "動画生成の設定 (ComfyUI)";
-            Width = 600;
+            Title = "生成の設定 (ComfyUI)";
+            Width = 620;
             SizeToContent = SizeToContent.Height;
             ResizeMode = ResizeMode.NoResize;
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
             ShowInTaskbar = false;
 
-            var panel = new StackPanel { Margin = new Thickness(16) };
+            string count = ComfySettings.PresetCount + " 件まで登録できます。";
 
-            panel.Children.Add(new TextBlock { Text = "ComfyUI の URL" });
-            var urlRow = new DockPanel { Margin = new Thickness(0, 4, 0, 12) };
             var test = new Button { Content = "接続テスト", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0) };
-            DockPanel.SetDock(test, Dock.Right);
-            urlRow.Children.Add(test);
-            urlBox = new TextBox { Text = ComfySettings.Url, Padding = new Thickness(2, 3, 2, 3) };
-            urlRow.Children.Add(urlBox);
-            panel.Children.Add(urlRow);
+            connection = new PresetTab(ComfySettings.Presets,
+                "接続先のプリセット (" + count + "ここで選んだものを使います)",
+                "名前 (一覧に出す名前。空でもかまいません)",
+                "ComfyUI の URL",
+                new TextBox { Padding = new Thickness(2, 3, 2, 3) }, test,
+                (p, i) => p.Label(i), s => s.Trim().TrimEnd('/'), list => ComfySettings.Presets = list);
 
-            panel.Children.Add(new TextBlock { Text = "ワークフロー (ComfyUI のメニュー「Export (API)」で保存した JSON)" });
-            var wfRow = new DockPanel { Margin = new Thickness(0, 4, 0, 8) };
             var browse = new Button { Content = "参照...", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0) };
-            DockPanel.SetDock(browse, Dock.Right);
-            wfRow.Children.Add(browse);
-            workflowBox = new TextBox { Text = ComfySettings.WorkflowPath ?? "", Padding = new Thickness(2, 3, 2, 3) };
-            wfRow.Children.Add(workflowBox);
-            panel.Children.Add(wfRow);
-
-            panel.Children.Add(new TextBlock
+            workflow = new PresetTab(ComfySettings.Workflows,
+                "ワークフローのプリセット (" + count + "ここで選んだものを使います)",
+                "名前 (一覧に出す名前。空ならファイル名を出します)",
+                "ワークフロー (ComfyUI のメニュー「Export (API)」で保存した JSON)",
+                new TextBox { Padding = new Thickness(2, 3, 2, 3) }, browse,
+                (p, i) => p.FileLabel(i), s => s.Trim().Trim('"'), list => ComfySettings.Workflows = list);
+            workflow.Panel.Children.Add(new TextBlock
             {
                 Text = "ワークフローの「Load Image」ノードの画像が、右クリックした画像に差し替わります。" +
-                       "seed は毎回ランダムになります。出来た動画は元の画像と同じフォルダに「(元の名前)_video.mp4」で保存します。",
+                       "seed は毎回ランダムになります。出来たファイルは元の画像と同じフォルダに、動画なら「(元の名前)_video.mp4」、画像なら「(元の名前)_i2i.png」で保存します。",
                 TextWrapping = TextWrapping.Wrap,
                 Foreground = Brushes.DimGray,
                 Margin = new Thickness(0, 0, 0, 8)
             });
+
+            prompt = new PresetTab(ComfySettings.PromptPresets,
+                "プロンプトのプリセット (" + count + "「生成する」の画面で選んで使います)",
+                "名前 (一覧に出す名前。空ならプロンプトの先頭を出します)",
+                "プロンプト",
+                new TextBox
+                {
+                    AcceptsReturn = true,
+                    TextWrapping = TextWrapping.Wrap,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    Height = 120,
+                    Padding = new Thickness(2, 3, 2, 3)
+                }, null,
+                (p, i) => p.TextLabel(i), s => s.Trim(), list => ComfySettings.PromptPresets = list);
+
+            var tabs = new TabControl { Margin = new Thickness(0, 0, 0, 12) };
+            tabs.Items.Add(new TabItem { Header = "接続先", Content = connection.Panel, Padding = new Thickness(12, 3, 12, 3) });
+            tabs.Items.Add(new TabItem { Header = "ワークフロー", Content = workflow.Panel, Padding = new Thickness(12, 3, 12, 3) });
+            tabs.Items.Add(new TabItem { Header = "プロンプト", Content = prompt.Panel, Padding = new Thickness(12, 3, 12, 3) });
+
+            var panel = new StackPanel { Margin = new Thickness(16) };
+            panel.Children.Add(tabs);
+
+            var inheritRating = new CheckBox
+            {
+                Content = "元の画像の評価 (★) を、生成したファイルに引き継ぐ",
+                IsChecked = ComfySettings.InheritRating,
+                Margin = new Thickness(0, 0, 0, 6)
+            };
+            var jumpToResult = new CheckBox
+            {
+                Content = "生成が終わったら、出来たファイルを表示する (まとめて生成のときは移動しません)",
+                IsChecked = ComfySettings.JumpToResult,
+                Margin = new Thickness(0, 0, 0, 12)
+            };
+            panel.Children.Add(inheritRating);
+            panel.Children.Add(jumpToResult);
             resultText = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 12) };
             panel.Children.Add(resultText);
 
@@ -3336,16 +3744,41 @@ namespace JRate
             panel.Children.Add(buttons);
             Content = panel;
 
+            connection.Box.SelectedIndex = ComfySettings.ActivePreset;
+            workflow.Box.SelectedIndex = ComfySettings.ActiveWorkflow;
+            prompt.Box.SelectedIndex = 0;
+
+            connection.SaveButton.Click += delegate
+            {
+                connection.Store();
+                Saved(connection, "接続先");
+            };
+            workflow.SaveButton.Click += delegate
+            {
+                // JSON が空なら未登録に戻す。入っていれば確かめてから保存する
+                string wf = workflow.Value;
+                if (wf.Length > 0 && !Check(wf)) return;
+                workflow.Store();
+                Saved(workflow, "ワークフロー");
+            };
+            prompt.SaveButton.Click += delegate
+            {
+                prompt.Store();
+                Saved(prompt, "プロンプト");
+            };
+            connection.DeleteButton.Click += delegate { DeletePreset(connection, "接続先"); };
+            workflow.DeleteButton.Click += delegate { DeletePreset(workflow, "ワークフロー"); };
+            prompt.DeleteButton.Click += delegate { DeletePreset(prompt, "プロンプト"); };
+
             test.Click += async delegate
             {
-                string url = urlBox.Text.Trim().TrimEnd('/');
-                resultText.Foreground = Brushes.DimGray;
-                resultText.Text = "接続中...";
+                string url = connection.Value;
+                Result(Brushes.DimGray, "接続中...");
                 test.IsEnabled = false;
                 string err = await Task.Run(() => ComfyVideo.Test(url));
                 test.IsEnabled = true;
-                resultText.Foreground = err == null ? Brushes.ForestGreen : Brushes.Firebrick;
-                resultText.Text = err == null ? "ComfyUI に接続できました: " + url : "接続できません: " + err;
+                if (err == null) Result(Brushes.ForestGreen, "ComfyUI に接続できました: " + url);
+                else Result(Brushes.Firebrick, "接続できません: " + err);
             };
 
             browse.Click += delegate
@@ -3355,30 +3788,76 @@ namespace JRate
                 ofd.Filter = "ワークフロー JSON (*.json)|*.json|すべてのファイル (*.*)|*.*";
                 try
                 {
-                    string cur = workflowBox.Text.Trim();
+                    string cur = workflow.Value;
                     if (cur.Length > 0 && File.Exists(cur)) ofd.InitialDirectory = System.IO.Path.GetDirectoryName(cur);
                 }
                 catch { }
                 if (ofd.ShowDialog(this) == true)
                 {
-                    workflowBox.Text = ofd.FileName;
+                    workflow.ValueBox.Text = ofd.FileName;
                     Check(ofd.FileName);
                 }
             };
 
+            // OK : 出している内容を保存して、選んでいる接続先とワークフローを使うものにする
             ok.Click += delegate
             {
-                string wf = workflowBox.Text.Trim().Trim('"');
+                if (connection.Value.Length == 0)
+                {
+                    tabs.SelectedIndex = 0;
+                    MessageBox.Show(this, "選んでいる接続先の URL を入力してください。", Title, MessageBoxButton.OK, MessageBoxImage.Warning);
+                    connection.ValueBox.Focus();
+                    return;
+                }
+                string wf = workflow.Value;
                 if (wf.Length == 0)
                 {
+                    tabs.SelectedIndex = 1;
                     MessageBox.Show(this, "ワークフローの JSON を指定してください。", Title, MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
-                if (!Check(wf)) return;
-                ComfySettings.Url = urlBox.Text;
-                ComfySettings.WorkflowPath = wf;
+                if (!Check(wf))
+                {
+                    tabs.SelectedIndex = 1;
+                    return;
+                }
+                connection.Store();
+                workflow.Store();
+                prompt.Store();
+                ComfySettings.ActivePreset = connection.Shown;
+                ComfySettings.ActiveWorkflow = workflow.Shown;
+                ComfySettings.InheritRating = inheritRating.IsChecked == true;
+                ComfySettings.JumpToResult = jumpToResult.IsChecked == true;
                 DialogResult = true;
             };
+        }
+
+        private void Result(Brush color, string text)
+        {
+            resultText.Foreground = color;
+            resultText.Text = text;
+        }
+
+        private void Saved(PresetTab tab, string what)
+        {
+            Result(Brushes.ForestGreen, what + "のプリセット " + (tab.Shown + 1) +
+                                        (tab.List[tab.Shown].IsEmpty ? " を未登録にしました" : " を保存しました"));
+        }
+
+        // 登録してあるものは確かめてから消す
+        private void DeletePreset(PresetTab tab, string what)
+        {
+            var p = tab.List[tab.Shown];
+            if (!p.IsEmpty || p.Name.Length > 0)
+            {
+                string value = p.Value.Length > 300 ? p.Value.Substring(0, 300) + "..." : p.Value;
+                string text = what + "のプリセット " + (tab.Shown + 1) + " を削除しますか？\n\n" +
+                              (p.Name.Length > 0 ? p.Name + "\n" : "") + value;
+                if (MessageBox.Show(this, text, Title, MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
+                    return;
+            }
+            tab.Delete();
+            Result(Brushes.ForestGreen, what + "のプリセット " + (tab.Shown + 1) + " を削除しました");
         }
 
         // ワークフローを確かめて結果を表示する
@@ -3389,38 +3868,49 @@ namespace JRate
                 var wf = ComfyVideo.LoadWorkflow(ComfyVideo.NewSerializer(), path);
                 int n = ComfyVideo.FindNodes(wf, "LoadImage").Count;
                 if (n == 0) throw new Exception("ワークフローに「Load Image」(LoadImage) ノードがありません。");
-                resultText.Foreground = Brushes.ForestGreen;
-                resultText.Text = "ワークフローを確認しました (ノード " + wf.Count + " 個、Load Image " + n + " 個" +
-                                  (n > 1 ? " ※すべて同じ画像に差し替わります" : "") + ")";
+                Result(Brushes.ForestGreen, "ワークフローを確認しました (ノード " + wf.Count + " 個、Load Image " + n + " 個" +
+                                            (n > 1 ? " ※すべて同じ画像に差し替わります" : "") + ")");
                 return true;
             }
             catch (Exception ex)
             {
-                resultText.Foreground = Brushes.Firebrick;
-                resultText.Text = ex.Message;
+                Result(Brushes.Firebrick, ex.Message);
                 return false;
             }
         }
     }
 
     // ------------------------------------------------------------------
-    // 「動画にする」のたびに出す、プロンプトと秒数の入力ダイアログ
+    // 「生成する」のたびに出す、接続先・ワークフロー・プロンプト・秒数・回数の入力ダイアログ
     // ------------------------------------------------------------------
     public class ComfyPromptDialog : Window
     {
         private const double MaxSeconds = 60;
+        private const int MaxRepeat = 20;
 
-        private readonly TextBox promptBox, secondsBox;
-        private readonly bool integerSeconds;   // 秒数を整数でしか受け付けないワークフロー
+        private readonly ComboBox setBox, presetBox, workflowBox, promptPresetBox;
+        private readonly List<int> presetIndex = new List<int>();      // 一覧の各行のプリセット番号
+        private readonly List<string> presetUrl = new List<string>();
+        private readonly List<string> presetName = new List<string>();
+        private readonly List<int> workflowIndex = new List<int>();
+        private readonly List<string> workflowPath = new List<string>();
+        private readonly List<string> workflowName = new List<string>();
+        private readonly TextBox promptBox, secondsBox, repeatBox;
+        private readonly TextBlock workflowError, promptLabel, secondsUnit;
+        private readonly DockPanel promptRow;
+        private readonly Button okButton;
+        private bool integerSeconds;   // 秒数を整数でしか受け付けないワークフロー
 
-        // ワークフローに入れる場所がない項目は null (ワークフローの値のまま)
-        public string Prompt { get; private set; }
-        public double? Seconds { get; private set; }
+        // 選んだ設定。プロンプトと秒数は、ワークフローに入れる場所がなければ null (ワークフローの値のまま)
+        public GenRequest Request { get; private set; }
 
-        public ComfyPromptDialog(string fileName, bool hasPrompt, double? workflowSeconds, bool integerSeconds)
+        // 画像 1 枚あたりの生成回数
+        public int Repeat { get; private set; }
+
+        // imageCount : 対象の画像の枚数 / prefill : 欄の初期値 (null なら前回の値)
+        public ComfyPromptDialog(string title, int imageCount, GenRequest prefill)
         {
-            this.integerSeconds = integerSeconds;
-            Title = "動画にする - " + fileName;
+            Title = title;
             Width = 600;
             SizeToContent = SizeToContent.Height;
             ResizeMode = ResizeMode.NoResize;
@@ -3429,16 +3919,136 @@ namespace JRate
 
             var panel = new StackPanel { Margin = new Thickness(16) };
 
-            panel.Children.Add(new TextBlock
+            // セット (接続先・ワークフロー・プロンプト・秒数をまとめて呼び出す)
+            var sets = ComfySettings.Sets;
+            var setRow = new DockPanel { Margin = new Thickness(0, 0, 0, 12) };
+            setRow.Children.Add(new TextBlock
             {
-                Text = hasPrompt ? "プロンプト (Ctrl+Enter で開始)"
-                                 : "プロンプト (このワークフローには入れる場所がありません)",
-                Foreground = hasPrompt ? Brushes.Black : Brushes.DimGray
+                Text = "セット",
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 8, 0)
             });
+            var saveSet = new Button { Content = "保存", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0), IsEnabled = false };
+            var deleteSet = new Button { Content = "削除", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0), IsEnabled = false };
+            saveSet.ToolTip = "今の接続先・ワークフロー・プロンプト・長さを、選んでいる番号にまとめて保存します";
+            DockPanel.SetDock(saveSet, Dock.Right);
+            DockPanel.SetDock(deleteSet, Dock.Right);
+            setRow.Children.Add(deleteSet);
+            setRow.Children.Add(saveSet);
+            setBox = new ComboBox();
+            for (int i = 0; i < sets.Length; i++) setBox.Items.Add(sets[i].Label(i));
+            // 前回選んでいたセットを選んだ状態にする。各欄には前回使った値が入るので、
+            // ここではセットの内容を入れ直さない (セットを選んだあとで直した内容を残すため)
+            int lastSet = ComfySettings.LastSet;
+            if (lastSet >= 0 && !sets[lastSet].IsEmpty)
+            {
+                setBox.SelectedIndex = lastSet;
+                saveSet.IsEnabled = true;
+                deleteSet.IsEnabled = true;
+            }
+            setRow.Children.Add(setBox);
+            panel.Children.Add(setRow);
+            panel.Children.Add(new Separator { Margin = new Thickness(0, 0, 0, 12) });
+
+            // 接続先 (登録してあるプリセットから選ぶ。初期値は前回使ったもの)
+            var presets = ComfySettings.Presets;
+            int active = ComfySettings.ActivePreset;
+            var destRow = new DockPanel { Margin = new Thickness(0, 0, 0, 12) };
+            destRow.Children.Add(new TextBlock
+            {
+                Text = "接続先",
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 8, 0)
+            });
+            presetBox = new ComboBox();
+            for (int i = 0; i < presets.Length; i++)
+            {
+                if (presets[i].IsEmpty) continue;
+                presetBox.Items.Add(presets[i].Label(i));
+                presetIndex.Add(i);
+                presetUrl.Add(presets[i].Value);
+                presetName.Add(presets[i].Name);
+                if (i == active) presetBox.SelectedIndex = presetBox.Items.Count - 1;
+            }
+            if (presetBox.Items.Count == 0)
+            {
+                presetBox.Items.Add(ComfySettings.DefaultUrl);
+                presetIndex.Add(-1);
+                presetUrl.Add(ComfySettings.DefaultUrl);
+                presetName.Add("");
+            }
+            if (presetBox.SelectedIndex < 0) presetBox.SelectedIndex = 0;
+            destRow.Children.Add(presetBox);
+            panel.Children.Add(destRow);
+
+            // ワークフロー (同じく登録してあるプリセットから選ぶ)
+            var workflows = ComfySettings.Workflows;
+            int activeWorkflow = ComfySettings.ActiveWorkflow;
+            var wfRow = new DockPanel { Margin = new Thickness(0, 0, 0, 12) };
+            wfRow.Children.Add(new TextBlock
+            {
+                Text = "ワークフロー",
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 8, 0)
+            });
+            workflowBox = new ComboBox();
+            for (int i = 0; i < workflows.Length; i++)
+            {
+                if (workflows[i].IsEmpty) continue;
+                workflowBox.Items.Add(workflows[i].FileLabel(i));
+                workflowIndex.Add(i);
+                workflowPath.Add(workflows[i].Value);
+                workflowName.Add(workflows[i].Name.Length > 0 ? workflows[i].Name : System.IO.Path.GetFileName(workflows[i].Value));
+                if (i == activeWorkflow) workflowBox.SelectedIndex = workflowBox.Items.Count - 1;
+            }
+            if (workflowBox.SelectedIndex < 0 && workflowBox.Items.Count > 0) workflowBox.SelectedIndex = 0;
+            wfRow.Children.Add(workflowBox);
+            panel.Children.Add(wfRow);
+
+            // 選んだワークフローを読めないときの理由
+            workflowError = new TextBlock
+            {
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = Brushes.Firebrick,
+                Margin = new Thickness(0, -4, 0, 12),
+                Visibility = Visibility.Collapsed
+            };
+            panel.Children.Add(workflowError);
+
+            // プロンプトのプリセット (選ぶとプロンプトの欄に入る。「保存」で今の欄の内容を登録)
+            var prompts = ComfySettings.PromptPresets;
+            promptRow = new DockPanel { Margin = new Thickness(0, 0, 0, 12) };
+            promptRow.Children.Add(new TextBlock
+            {
+                Text = "プロンプトのプリセット",
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 8, 0)
+            });
+            var savePrompt = new Button { Content = "保存", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0), IsEnabled = false };
+            var deletePrompt = new Button { Content = "削除", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0), IsEnabled = false };
+            DockPanel.SetDock(savePrompt, Dock.Right);
+            DockPanel.SetDock(deletePrompt, Dock.Right);
+            promptRow.Children.Add(deletePrompt);
+            promptRow.Children.Add(savePrompt);
+            promptPresetBox = new ComboBox();
+            for (int i = 0; i < prompts.Length; i++) promptPresetBox.Items.Add(prompts[i].TextLabel(i));
+            // 前回選んでいたプリセットを選んだ状態にする。プロンプトの欄には前回使った内容が入るので、
+            // ここではプリセットの内容を入れ直さない (選んだあとで直した内容を残すため)
+            int lastPrompt = ComfySettings.LastPromptPreset;
+            if (lastPrompt >= 0 && !prompts[lastPrompt].IsEmpty)
+            {
+                promptPresetBox.SelectedIndex = lastPrompt;
+                savePrompt.IsEnabled = true;
+                deletePrompt.IsEnabled = true;
+            }
+            promptRow.Children.Add(promptPresetBox);
+            panel.Children.Add(promptRow);
+
+            promptLabel = new TextBlock();
+            panel.Children.Add(promptLabel);
             promptBox = new TextBox
             {
-                Text = hasPrompt ? ComfySettings.Prompt : "",
-                IsEnabled = hasPrompt,
+                Text = ComfySettings.Prompt,
                 AcceptsReturn = true,
                 TextWrapping = TextWrapping.Wrap,
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
@@ -3448,47 +4058,167 @@ namespace JRate
             };
             panel.Children.Add(promptBox);
 
-            bool hasSeconds = workflowSeconds != null;
             var secRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 16) };
             secRow.Children.Add(new TextBlock { Text = "長さ", VerticalAlignment = VerticalAlignment.Center });
-            string sec = "";
-            if (hasSeconds)
-            {
-                // 前回の秒数、なければワークフローに書かれている秒数
-                double last;
-                sec = TryParseSeconds(ComfySettings.Seconds, out last)
-                    ? ComfySettings.Seconds
-                    : workflowSeconds.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
             secondsBox = new TextBox
             {
-                Text = sec,
-                IsEnabled = hasSeconds,
                 Width = 60,
                 Padding = new Thickness(2, 3, 2, 3),
                 Margin = new Thickness(8, 0, 6, 0),
                 HorizontalContentAlignment = HorizontalAlignment.Right
             };
             secRow.Children.Add(secondsBox);
-            secRow.Children.Add(new TextBlock
-            {
-                Text = hasSeconds ? "秒" : "秒 (このワークフローでは変えられません)",
-                Foreground = hasSeconds ? Brushes.Black : Brushes.DimGray,
-                VerticalAlignment = VerticalAlignment.Center
-            });
+            secondsUnit = new TextBlock { VerticalAlignment = VerticalAlignment.Center };
+            secRow.Children.Add(secondsUnit);
             panel.Children.Add(secRow);
 
+            // 回数 (同じ画像を seed 違いで何回か生成する)
+            var repeatRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, -4, 0, 16) };
+            repeatRow.Children.Add(new TextBlock { Text = "回数", VerticalAlignment = VerticalAlignment.Center });
+            repeatBox = new TextBox
+            {
+                Text = "1",
+                Width = 60,
+                Padding = new Thickness(2, 3, 2, 3),
+                Margin = new Thickness(8, 0, 6, 0),
+                HorizontalContentAlignment = HorizontalAlignment.Right
+            };
+            repeatRow.Children.Add(repeatBox);
+            repeatRow.Children.Add(new TextBlock
+            {
+                Text = (imageCount > 1 ? "回ずつ" : "回") + " (2 回以上にすると、seed を変えて繰り返します)",
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            panel.Children.Add(repeatRow);
+
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
-            var ok = new Button { Content = "動画にする", Width = 100 };
+            okButton = new Button
+            {
+                Content = imageCount > 1 ? imageCount + " 枚を生成する" : "生成する",
+                MinWidth = 100,
+                Padding = new Thickness(12, 1, 12, 1)
+            };
             var cancel = new Button { Content = "キャンセル", Width = 90, IsCancel = true, Margin = new Thickness(8, 0, 0, 0) };
-            buttons.Children.Add(ok);
+            buttons.Children.Add(okButton);
             buttons.Children.Add(cancel);
             panel.Children.Add(buttons);
             Content = panel;
 
-            ok.Click += delegate { Accept(); };
+            okButton.Click += delegate { Accept(); };
 
-            // Enter はプロンプトの改行。開始は「動画にする」ボタンか Ctrl+Enter (どの欄にいても効く)
+            // プロンプトと秒数を入れられるかどうかはワークフローで決まる
+            ApplyWorkflow();
+            workflowBox.SelectionChanged += delegate { ApplyWorkflow(); };
+
+            // プリセットを選ぶと、登録してある内容がプロンプトの欄に入る (未登録の番号なら欄はそのまま)
+            bool relabeling = false;
+            Action<int> relabel = n =>
+            {
+                relabeling = true;
+                promptPresetBox.Items[n] = prompts[n].TextLabel(n);
+                promptPresetBox.SelectedIndex = n;
+                relabeling = false;
+                deletePrompt.IsEnabled = !prompts[n].IsEmpty;
+            };
+            promptPresetBox.SelectionChanged += delegate
+            {
+                if (relabeling) return;
+                int n = promptPresetBox.SelectedIndex;
+                savePrompt.IsEnabled = n >= 0;
+                deletePrompt.IsEnabled = n >= 0 && !prompts[n].IsEmpty;
+                if (n >= 0 && !prompts[n].IsEmpty) promptBox.Text = prompts[n].Value;
+            };
+            // 今のプロンプトの欄の内容を、選んでいる番号に保存する (名前は「生成の設定...」で付ける)
+            savePrompt.Click += delegate
+            {
+                int n = promptPresetBox.SelectedIndex;
+                string text = promptBox.Text.Trim();
+                if (text.Length == 0)
+                {
+                    MessageBox.Show(this, "プロンプトが空です。", Title, MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                prompts[n].Value = text;
+                ComfySettings.PromptPresets = prompts;
+                relabel(n);
+            };
+            deletePrompt.Click += delegate
+            {
+                int n = promptPresetBox.SelectedIndex;
+                string value = prompts[n].Value.Length > 300 ? prompts[n].Value.Substring(0, 300) + "..." : prompts[n].Value;
+                if (MessageBox.Show(this, "プロンプトのプリセット " + (n + 1) + " を削除しますか？\n\n" +
+                                          (prompts[n].Name.Length > 0 ? prompts[n].Name + "\n" : "") + value,
+                                    Title, MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
+                    return;
+                prompts[n].Clear();
+                ComfySettings.PromptPresets = prompts;
+                relabel(n);
+            };
+
+            // セットを選ぶと、登録してある設定が各欄に入る (未登録の番号なら欄はそのまま)
+            bool relabelingSet = false;
+            Action<int> relabelSet = n =>
+            {
+                relabelingSet = true;
+                setBox.Items[n] = sets[n].Label(n);
+                setBox.SelectedIndex = n;
+                relabelingSet = false;
+                deleteSet.IsEnabled = !sets[n].IsEmpty;
+            };
+            setBox.SelectionChanged += delegate
+            {
+                if (relabelingSet) return;
+                int n = setBox.SelectedIndex;
+                saveSet.IsEnabled = n >= 0;
+                deleteSet.IsEnabled = n >= 0 && !sets[n].IsEmpty;
+                if (n < 0 || sets[n].IsEmpty) return;
+                Apply(sets[n].Url, sets[n].Workflow, sets[n].Prompt.Length > 0 ? sets[n].Prompt : null, sets[n].Seconds);
+                if (sets[n].Prompt.Length == 0) return;   // プロンプトを持たないセット : プリセットの表示もそのまま
+
+                // プロンプトのプリセットの表示を、セットを保存したときに選んでいた番号に合わせる。
+                // プロンプトの欄にはセットの内容を入れたので、プリセットの内容は入れ直さない
+                int pp = sets[n].PromptPreset;
+                if (pp >= 0 && prompts[pp].IsEmpty) pp = -1;   // そのプリセットは削除されている
+                relabeling = true;
+                promptPresetBox.SelectedIndex = pp;
+                relabeling = false;
+                savePrompt.IsEnabled = pp >= 0;
+                deletePrompt.IsEnabled = pp >= 0;
+            };
+            saveSet.Click += delegate
+            {
+                int n = setBox.SelectedIndex;
+                if (workflowBox.SelectedIndex < 0) return;
+                var ask = new NameDialog("セットを保存", "セット " + (n + 1) + " の名前",
+                                         sets[n].Name.Length > 0 ? sets[n].Name : workflowName[workflowBox.SelectedIndex]);
+                ask.Owner = this;
+                if (ask.ShowDialog() != true) return;
+                sets[n].Name = ask.Value;
+                sets[n].Url = presetUrl[Math.Max(presetBox.SelectedIndex, 0)];
+                sets[n].Workflow = workflowPath[workflowBox.SelectedIndex];
+                sets[n].Prompt = promptBox.IsEnabled ? promptBox.Text.Trim() : "";
+                sets[n].PromptPreset = promptBox.IsEnabled ? promptPresetBox.SelectedIndex : -1;
+                sets[n].Seconds = secondsBox.IsEnabled ? secondsBox.Text.Trim() : "";
+                ComfySettings.Sets = sets;
+                relabelSet(n);
+            };
+            deleteSet.Click += delegate
+            {
+                int n = setBox.SelectedIndex;
+                if (MessageBox.Show(this, "セット " + (n + 1) + " を削除しますか？\n\n" + sets[n].Name,
+                                    Title, MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
+                    return;
+                sets[n] = new ComfySet();
+                ComfySettings.Sets = sets;
+                relabelSet(n);
+            };
+
+            // 「生成時の設定」から開いたときは、そのときの設定を入れておく
+            if (prefill != null)
+                Apply(prefill.Url, prefill.WorkflowPath, prefill.Prompt,
+                      prefill.Seconds != null ? prefill.Seconds.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "");
+
+            // Enter はプロンプトの改行。開始は「生成する」ボタンか Ctrl+Enter (どの欄にいても効く)
             PreviewKeyDown += delegate(object s, KeyEventArgs e)
             {
                 if (e.Key == Key.Enter && Keyboard.Modifiers == ModifierKeys.Control)
@@ -3500,15 +4230,39 @@ namespace JRate
 
             Loaded += delegate
             {
-                var first = hasPrompt ? promptBox : hasSeconds ? secondsBox : null;
-                if (first == null) { ok.Focus(); return; }
+                var first = promptBox.IsEnabled ? promptBox : secondsBox.IsEnabled ? secondsBox : null;
+                if (first == null) { okButton.Focus(); return; }
                 first.Focus();
                 first.SelectAll();
             };
         }
 
+        // 接続先・ワークフロー・プロンプト・秒数を欄に入れる。接続先とワークフローは一覧に
+        // あるものだけ選び直す (プリセットから消されていたら今のまま)。prompt が null ならそのまま
+        private void Apply(string url, string workflow, string prompt, string seconds)
+        {
+            int i = presetUrl.FindIndex(u => string.Equals(u, url, StringComparison.OrdinalIgnoreCase));
+            if (i >= 0) presetBox.SelectedIndex = i;
+            i = workflowPath.FindIndex(p => string.Equals(p, workflow, StringComparison.OrdinalIgnoreCase));
+            if (i >= 0) workflowBox.SelectedIndex = i;   // 欄の有効・無効は ApplyWorkflow が切り替える
+            if (prompt != null && promptBox.IsEnabled) promptBox.Text = prompt;
+            double sec;
+            if (secondsBox.IsEnabled && TryParseSeconds(seconds, out sec)) secondsBox.Text = seconds.Trim();
+        }
+
         private void Accept()
         {
+            if (!okButton.IsEnabled) return;   // ワークフローを読めていない (Ctrl+Enter で来たとき)
+            int repeat;
+            if (!int.TryParse(repeatBox.Text.Trim(), out repeat) || repeat < 1 || repeat > MaxRepeat)
+            {
+                MessageBox.Show(this, "回数は 1 ～ " + MaxRepeat + " の整数で指定してください。", Title,
+                                MessageBoxButton.OK, MessageBoxImage.Warning);
+                repeatBox.Focus();
+                repeatBox.SelectAll();
+                return;
+            }
+            var request = new GenRequest();
             if (secondsBox.IsEnabled)
             {
                 double sec;
@@ -3521,15 +4275,72 @@ namespace JRate
                     secondsBox.SelectAll();
                     return;
                 }
-                Seconds = sec;
+                request.Seconds = sec;
                 ComfySettings.Seconds = secondsBox.Text;
             }
             if (promptBox.IsEnabled)
             {
-                Prompt = promptBox.Text.Trim();
-                ComfySettings.Prompt = Prompt;
+                request.Prompt = promptBox.Text.Trim();
+                ComfySettings.Prompt = request.Prompt;
             }
+            int sel = Math.Max(presetBox.SelectedIndex, 0);
+            request.Url = presetUrl[sel];
+            request.ConnectionName = presetName[sel];
+            if (presetIndex[sel] >= 0) ComfySettings.ActivePreset = presetIndex[sel];
+            request.WorkflowPath = workflowPath[workflowBox.SelectedIndex];
+            request.WorkflowName = workflowName[workflowBox.SelectedIndex];
+            ComfySettings.ActiveWorkflow = workflowIndex[workflowBox.SelectedIndex];
+            ComfySettings.LastSet = setBox.SelectedIndex;
+            if (promptBox.IsEnabled) ComfySettings.LastPromptPreset = promptPresetBox.SelectedIndex;
+            Request = request;
+            Repeat = repeat;
             DialogResult = true;
+        }
+
+        // 選んでいるワークフローを読んで、プロンプトと秒数の欄を使えるかどうかを決める。
+        // 読めないときは理由を出して「生成する」を押せなくする
+        private void ApplyWorkflow()
+        {
+            bool hasPrompt = false;
+            double? workflowSeconds = null;
+            string error = null;
+            integerSeconds = false;
+            try
+            {
+                int sel = workflowBox.SelectedIndex;
+                if (sel < 0) throw new Exception("ワークフローが登録されていません。「生成の設定...」で登録してください。");
+                var wf = ComfyVideo.LoadWorkflow(ComfyVideo.NewSerializer(), workflowPath[sel]);
+                if (ComfyVideo.FindNodes(wf, "LoadImage").Count == 0)
+                    throw new Exception("ワークフローに「Load Image」(LoadImage) ノードがありません。\n" + workflowPath[sel]);
+                hasPrompt = ComfyVideo.HasPrompt(wf);
+                workflowSeconds = ComfyVideo.GetDuration(wf);
+                integerSeconds = ComfyVideo.DurationIsInteger(wf);
+            }
+            catch (Exception ex) { error = ex.Message; }
+
+            bool ok = error == null;
+            workflowError.Text = error ?? "";
+            workflowError.Visibility = ok ? Visibility.Collapsed : Visibility.Visible;
+            okButton.IsEnabled = ok;
+
+            promptLabel.Text = hasPrompt || !ok ? "プロンプト (Ctrl+Enter で開始)"
+                                                : "プロンプト (このワークフローには入れる場所がありません)";
+            promptLabel.Foreground = hasPrompt ? Brushes.Black : Brushes.DimGray;
+            promptBox.IsEnabled = hasPrompt;
+            promptRow.IsEnabled = hasPrompt;
+
+            bool hasSeconds = workflowSeconds != null;
+            double cur;
+            if (hasSeconds && !TryParseSeconds(secondsBox.Text, out cur))
+            {
+                // 前回の秒数、なければワークフローに書かれている秒数
+                secondsBox.Text = TryParseSeconds(ComfySettings.Seconds, out cur)
+                    ? ComfySettings.Seconds
+                    : workflowSeconds.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+            secondsBox.IsEnabled = hasSeconds;
+            secondsUnit.Text = hasSeconds || !ok ? "秒" : "秒 (このワークフローでは変えられません)";
+            secondsUnit.Foreground = hasSeconds ? Brushes.Black : Brushes.DimGray;
         }
 
         private static bool TryParseSeconds(string text, out double seconds)

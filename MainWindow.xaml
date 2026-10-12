@@ -166,6 +166,7 @@
     <WrapPanel Orientation="Horizontal">
       <Button x:Name="OpenButton" Content="フォルダを開く" Style="{StaticResource Btn}"/>
       <Button x:Name="GridButton" Content="グリッド一覧" Style="{StaticResource Btn}" ToolTip="表示中の画像・動画を別ウインドウに一覧表示 (Ctrl+G)"/>
+      <Button x:Name="JobsButton" Content="生成ジョブ" Style="{StaticResource Btn}" ToolTip="ComfyUI での生成の進み具合を一覧表示・キャンセル (Ctrl+J)"/>
       <Rectangle Width="1" Fill="#555555" Margin="10,6"/>
       <TextBlock Text="フィルター" Foreground="#AAAAAA" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="13"/>
       <ToggleButton x:Name="F1" Content="★1" Style="{StaticResource Tgl}"/>
@@ -177,6 +178,9 @@
       <ToggleButton x:Name="ModeAtLeast" Content="以上" Style="{StaticResource Tgl}"/>
       <ToggleButton x:Name="ModeAtMost" Content="以下" Style="{StaticResource Tgl}"/>
       <ToggleButton x:Name="ModeOnly" Content="のみ" Style="{StaticResource Tgl}"/>
+      <Rectangle Width="1" Fill="#555555" Margin="10,6"/>
+      <ToggleButton x:Name="TypeImage" Content="画像のみ表示" Style="{StaticResource Tgl}" ToolTip="画像だけを表示 (もう一度押すと解除)"/>
+      <ToggleButton x:Name="TypeVideo" Content="動画のみ表示" Style="{StaticResource Tgl}" ToolTip="動画だけを表示 (もう一度押すと解除)"/>
       <Rectangle Width="1" Fill="#555555" Margin="10,6"/>
       <Button x:Name="FilterAll" Content="すべて表示" Style="{StaticResource Btn}"/>
       <Rectangle Width="1" Fill="#555555" Margin="10,6"/>

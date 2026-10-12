@@ -19,7 +19,7 @@ set WPF=%FW%\WPF
   /resource:GridWindow.xaml,GridWindow.xaml ^
   /resource:J-Rate.ico,J-Rate.ico ^
   /win32icon:J-Rate.ico ^
-  JRate.cs ComfyVideo.cs
+  JRate.cs ComfyVideo.cs ComfyJobs.cs
 if errorlevel 1 (
   echo BUILD FAILED
   exit /b 1
