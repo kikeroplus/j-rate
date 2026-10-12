@@ -3771,7 +3771,7 @@ namespace JRate
             });
 
             prompt = new PresetTab(ComfySettings.PromptPresets,
-                "プロンプトのプリセット (" + count + "「生成する」の画面で選んで使います)",
+                "プロンプトのプリセット (" + ComfySettings.PromptCount + " 件まで登録できます。「生成する」の画面で選んで使います)",
                 "名前 (一覧に出す名前。空ならプロンプトの先頭を出します)",
                 "プロンプト",
                 new TextBox

@@ -241,7 +241,8 @@ namespace JRate
     {
         public const string DefaultUrl = "http://127.0.0.1:8188";
         public const int PresetCount = 10;
-        public const int WorkflowCount = 100;   // ワークフローだけは多く登録できる
+        public const int WorkflowCount = 100;   // ワークフローとプロンプトは多く登録できる
+        public const int PromptCount = 100;
 
         // 接続先のプリセット (comfy_presets.txt)。いつも PresetCount 件 (未登録のものは空)
         public static ComfyPreset[] Presets
@@ -330,13 +331,14 @@ namespace JRate
         }
 
         // プロンプトのプリセット。値はプロンプトの本文 (改行があるので 1 件ずつ
-        // comfy_prompt_1.txt ～ comfy_prompt_10.txt)、名前は comfy_prompt_names.txt に「番号 <Tab> 名前」
+        // comfy_prompt_1.txt ～ comfy_prompt_100.txt)、名前は comfy_prompt_names.txt に「番号 <Tab> 名前」。
+        // いつも PromptCount 件 (未登録のものは空)
         public static ComfyPreset[] PromptPresets
         {
             get
             {
-                var list = new ComfyPreset[PresetCount];
-                for (int i = 0; i < PresetCount; i++)
+                var list = new ComfyPreset[PromptCount];
+                for (int i = 0; i < PromptCount; i++)
                 {
                     list[i] = new ComfyPreset();
                     list[i].Value = Load("comfy_prompt_" + (i + 1) + ".txt") ?? "";
@@ -345,7 +347,7 @@ namespace JRate
                 {
                     string[] p = line.TrimEnd('\r').Split('\t');
                     int n;
-                    if (p.Length < 2 || !int.TryParse(p[0], out n) || n < 1 || n > PresetCount) continue;
+                    if (p.Length < 2 || !int.TryParse(p[0], out n) || n < 1 || n > PromptCount) continue;
                     list[n - 1].Name = p[1].Trim();
                 }
                 return list;
@@ -353,7 +355,7 @@ namespace JRate
             set
             {
                 var names = new StringBuilder();
-                for (int i = 0; i < PresetCount && i < value.Length; i++)
+                for (int i = 0; i < PromptCount && i < value.Length; i++)
                 {
                     string file = "comfy_prompt_" + (i + 1) + ".txt";
                     string text = (value[i].Value ?? "").Trim();
@@ -404,7 +406,7 @@ namespace JRate
                         list[i].Prompt = Str(d, "prompt");
                         list[i].Seconds = Str(d, "seconds");
                         int pp;
-                        list[i].PromptPreset = int.TryParse(Str(d, "promptPreset"), out pp) && pp >= 1 && pp <= PresetCount ? pp - 1 : -1;
+                        list[i].PromptPreset = int.TryParse(Str(d, "promptPreset"), out pp) && pp >= 1 && pp <= PromptCount ? pp - 1 : -1;
                     }
                 }
                 catch { }
@@ -445,7 +447,7 @@ namespace JRate
             get
             {
                 int n;
-                return int.TryParse(Load("comfy_prompt_preset.txt"), out n) && n >= 1 && n <= PresetCount ? n - 1 : -1;
+                return int.TryParse(Load("comfy_prompt_preset.txt"), out n) && n >= 1 && n <= PromptCount ? n - 1 : -1;
             }
             set { Save("comfy_prompt_preset.txt", (value + 1).ToString()); }
         }
