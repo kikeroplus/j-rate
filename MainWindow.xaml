@@ -166,7 +166,9 @@
     <WrapPanel Orientation="Horizontal">
       <Button x:Name="OpenButton" Content="フォルダを開く" Style="{StaticResource Btn}"/>
       <Button x:Name="GridButton" Content="グリッド一覧" Style="{StaticResource Btn}" ToolTip="表示中の画像・動画を別ウインドウに一覧表示 (Ctrl+G)"/>
+      <Button x:Name="GenerateButton" Content="生成する" Style="{StaticResource Btn}" ToolTip="表示している画像から ComfyUI で動画や画像を生成"/>
       <Button x:Name="JobsButton" Content="生成ジョブ" Style="{StaticResource Btn}" ToolTip="ComfyUI での生成の進み具合を一覧表示・キャンセル (Ctrl+J)"/>
+      <Button x:Name="ComfySettingsButton" Content="生成の設定" Style="{StaticResource Btn}" ToolTip="ComfyUI の接続先・ワークフロー・プロンプトのプリセットの登録や並び替え、エクスポート・インポート"/>
       <Rectangle Width="1" Fill="#555555" Margin="10,6"/>
       <TextBlock Text="フィルター" Foreground="#AAAAAA" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="13"/>
       <ToggleButton x:Name="F1" Content="★1" Style="{StaticResource Tgl}"/>

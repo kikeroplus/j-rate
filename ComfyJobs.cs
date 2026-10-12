@@ -258,7 +258,21 @@ namespace JRate
             var close = new Button { Content = "閉じる", Width = 90, IsCancel = true, IsDefault = true, Margin = new Thickness(8, 0, 0, 0) };
             buttons.Children.Add(again);
             buttons.Children.Add(close);
-            panel.Children.Add(buttons);
+
+            // 左下 : この設定をクリップボードへ (「生成する」の画面の「貼り付け」で使える)
+            const string copyLabel = "パラメーターをコピー";
+            var copy = new Button
+            {
+                Content = copyLabel,
+                Padding = new Thickness(12, 2, 12, 2),
+                ToolTip = "接続先・ワークフロー・プロンプト・長さをクリップボードにコピーします (「生成する」の画面で貼り付けられます)"
+            };
+            copy.Click += delegate { GenClipboard.Copy(copy, copyLabel, req); };
+            var bottom = new DockPanel();
+            DockPanel.SetDock(copy, Dock.Left);
+            bottom.Children.Add(copy);
+            bottom.Children.Add(buttons);
+            panel.Children.Add(bottom);
             Content = panel;
 
             again.Click += delegate
@@ -289,6 +303,40 @@ namespace JRate
             Grid.SetColumn(v, 1);
             grid.Children.Add(c);
             grid.Children.Add(v);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 生成パラメーターをクリップボードに入れる / クリップボードから読む
+    // ------------------------------------------------------------------
+    public static class GenClipboard
+    {
+        // コピーできたら、押したボタンの表示をしばらく「コピーしました」にする (label は元の表示)
+        public static void Copy(Button button, string label, GenRequest request)
+        {
+            try { Clipboard.SetText(GenParams.ToText(request)); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(Window.GetWindow(button), "クリップボードにコピーできません。\n\n" + ex.Message, "J-Rate",
+                                MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            if (button.ActualWidth > 0) button.MinWidth = button.ActualWidth;   // 表示を変えても幅が動かないように
+            button.Content = "コピーしました";
+            var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1.5) };
+            timer.Tick += delegate
+            {
+                timer.Stop();
+                button.Content = label;
+            };
+            timer.Start();
+        }
+
+        // クリップボードに生成パラメーターがなければ null
+        public static GenRequest Paste()
+        {
+            try { return Clipboard.ContainsText() ? GenParams.Parse(Clipboard.GetText()) : null; }
+            catch { return null; }
         }
     }
 

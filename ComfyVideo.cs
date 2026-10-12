@@ -90,6 +90,60 @@ namespace JRate
         public double? Seconds;    // 同上
     }
 
+    // ------------------------------------------------------------------
+    // 生成パラメーター (GenRequest) と、クリップボードに入れる文字列の変換。
+    // 人が読める形にしておく : 1 行目が目印、「項目: 値」の行が続き、「プロンプト:」の次の行から
+    // 最後までがプロンプト。長さとプロンプトは、ワークフローのまま (null) なら行を出さない
+    // ------------------------------------------------------------------
+    public static class GenParams
+    {
+        private const string Header = "[J-Rate 生成パラメーター]";
+
+        public static string ToText(GenRequest r)
+        {
+            var sb = new StringBuilder();
+            sb.Append(Header).Append("\r\n");
+            sb.Append("接続先: ").Append(r.ConnectionName).Append("\r\n");
+            sb.Append("URL: ").Append(r.Url).Append("\r\n");
+            sb.Append("ワークフロー: ").Append(r.WorkflowName).Append("\r\n");
+            sb.Append("ワークフローのパス: ").Append(r.WorkflowPath).Append("\r\n");
+            if (r.Seconds != null)
+                sb.Append("長さ: ").Append(r.Seconds.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append("\r\n");
+            if (r.Prompt != null) sb.Append("プロンプト:\r\n").Append(r.Prompt.Trim());
+            return sb.ToString();
+        }
+
+        // 目印のない文字列なら null
+        public static GenRequest Parse(string text)
+        {
+            string[] lines = (text ?? "").Replace("\r\n", "\n").Split('\n');
+            int i = 0;
+            while (i < lines.Length && lines[i].Trim().Length == 0) i++;
+            if (i >= lines.Length || lines[i].Trim() != Header) return null;
+            var r = new GenRequest();
+            for (i++; i < lines.Length; i++)
+            {
+                if (lines[i].Trim() == "プロンプト:")
+                {
+                    r.Prompt = string.Join("\r\n", lines, i + 1, lines.Length - i - 1).Trim();
+                    break;
+                }
+                int c = lines[i].IndexOf(':');
+                if (c < 0) continue;
+                string key = lines[i].Substring(0, c).Trim(), value = lines[i].Substring(c + 1).Trim();
+                double sec;
+                if (key == "接続先") r.ConnectionName = value;
+                else if (key == "URL") r.Url = value;
+                else if (key == "ワークフロー") r.WorkflowName = value;
+                else if (key == "ワークフローのパス") r.WorkflowPath = value;
+                else if (key == "長さ" && double.TryParse(value, System.Globalization.NumberStyles.Float,
+                                                         System.Globalization.CultureInfo.InvariantCulture, out sec))
+                    r.Seconds = sec;
+            }
+            return r;
+        }
+    }
+
     // 生成したファイル 1 つぶんの記録
     public class GenRecord
     {
