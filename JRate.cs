@@ -1545,7 +1545,7 @@ namespace JRate
                 result = await Task.Run(() =>
                 {
                     var files = ComfyVideo.Generate(job.Source, request.Url, request.WorkflowPath,
-                                                    request.Prompt, request.Seconds, report, token);
+                                                    request.FullPrompt, request.Seconds, report, token);
                     foreach (string f in files) ComfyHistory.Add(f, job.Source, request);   // どの設定で作ったかを残す
                     return files;
                 });
@@ -3792,6 +3792,40 @@ namespace JRate
                     ComfySettings.Sets = sets;
                 });
 
+            // ベースプロンプト : アプリに動画用と画像用が 1 つずつ。OK で保存する
+            var basePanel = new StackPanel { Margin = new Thickness(12, 12, 12, 4) };
+            basePanel.Children.Add(new TextBlock
+            {
+                Text = "ベースプロンプト (毎回、「生成する」の画面のプロンプトのあとに続けて ComfyUI に送ります。空なら何も足しません)",
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 10)
+            });
+            Func<string, TextBox> baseBox = text => new TextBox
+            {
+                Text = text,
+                AcceptsReturn = true,
+                TextWrapping = TextWrapping.Wrap,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Height = 100,
+                Padding = new Thickness(2, 3, 2, 3),
+                Margin = new Thickness(0, 4, 0, 12)
+            };
+            var baseVideo = baseBox(ComfySettings.BasePromptVideo);
+            var baseImage = baseBox(ComfySettings.BasePromptImage);
+            basePanel.Children.Add(new TextBlock { Text = "動画用 (動画を作るワークフローのとき)" });
+            basePanel.Children.Add(baseVideo);
+            basePanel.Children.Add(new TextBlock { Text = "画像用 (画像を作るワークフローのとき)" });
+            basePanel.Children.Add(baseImage);
+            basePanel.Children.Add(new TextBlock
+            {
+                Text = "動画用か画像用かは、ワークフローのノードから自動で見分けます (「生成する」の画面に、どちらを使うかが出ます)。" +
+                       "プロンプトとベースプロンプトの間は改行で区切ります。OK を押すと保存します。" +
+                       "プロンプトを入れる場所のないワークフローでは使いません。",
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = Brushes.DimGray,
+                Margin = new Thickness(0, 0, 0, 8)
+            });
+
             // セット : ここでは並び替えだけ (保存と削除は「生成する」の画面で行う)
             var setPanel = new StackPanel { Margin = new Thickness(12, 12, 12, 4) };
             setPanel.Children.Add(new TextBlock { Text = "セットの並び替え (セットの保存と削除は「生成する」の画面で行います)" });
@@ -3832,6 +3866,7 @@ namespace JRate
             tabs.Items.Add(new TabItem { Header = "接続先", Content = connection.Panel, Padding = new Thickness(12, 3, 12, 3) });
             tabs.Items.Add(new TabItem { Header = "ワークフロー", Content = workflow.Panel, Padding = new Thickness(12, 3, 12, 3) });
             tabs.Items.Add(new TabItem { Header = "プロンプト", Content = prompt.Panel, Padding = new Thickness(12, 3, 12, 3) });
+            tabs.Items.Add(new TabItem { Header = "ベースプロンプト", Content = basePanel, Padding = new Thickness(12, 3, 12, 3) });
             tabs.Items.Add(new TabItem { Header = "セット", Content = setPanel, Padding = new Thickness(12, 3, 12, 3) });
 
             var panel = new StackPanel { Margin = new Thickness(16) };
@@ -3986,6 +4021,8 @@ namespace JRate
                 connection.Store();
                 workflow.Store();
                 prompt.Store();
+                ComfySettings.BasePromptVideo = baseVideo.Text;
+                ComfySettings.BasePromptImage = baseImage.Text;
                 ComfySettings.ActivePreset = connection.Shown;
                 ComfySettings.ActiveWorkflow = workflow.Shown;
                 ComfySettings.InheritRating = inheritRating.IsChecked == true;
@@ -4030,7 +4067,8 @@ namespace JRate
                 var wf = ComfyVideo.LoadWorkflow(ComfyVideo.NewSerializer(), path);
                 int n = ComfyVideo.FindNodes(wf, "LoadImage").Count;
                 if (n == 0) throw new Exception("ワークフローに「Load Image」(LoadImage) ノードがありません。");
-                Result(Brushes.ForestGreen, "ワークフローを確認しました (ノード " + wf.Count + " 個、Load Image " + n + " 個" +
+                Result(Brushes.ForestGreen, "ワークフローを確認しました (" + (ComfyVideo.IsVideoWorkflow(wf) ? "動画用" : "画像用") +
+                                            "、ノード " + wf.Count + " 個、Load Image " + n + " 個" +
                                             (n > 1 ? " ※すべて同じ画像に差し替わります" : "") + ")");
                 return true;
             }
@@ -4058,7 +4096,8 @@ namespace JRate
         private readonly List<string> workflowPath = new List<string>();
         private readonly List<string> workflowName = new List<string>();
         private readonly TextBox promptBox, secondsBox, repeatBox;
-        private readonly TextBlock workflowError, promptLabel, secondsUnit;
+        private readonly TextBlock workflowError, promptLabel, secondsUnit, baseHint;
+        private string basePrompt = "";   // 選んでいるワークフローで使うベースプロンプト (動画用か画像用)
         private readonly DockPanel promptRow;
         private readonly Button okButton;
         private bool integerSeconds;   // 秒数を整数でしか受け付けないワークフロー
@@ -4222,6 +4261,16 @@ namespace JRate
                 Margin = new Thickness(0, 4, 0, 12)
             };
             panel.Children.Add(promptBox);
+
+            // プロンプトのあとに続けて送るベースプロンプト (動画用か画像用か) を見せておく。中身は ApplyWorkflow が入れる
+            baseHint = new TextBlock
+            {
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                Foreground = Brushes.DimGray,
+                Margin = new Thickness(0, -8, 0, 12),
+                Visibility = Visibility.Collapsed
+            };
+            panel.Children.Add(baseHint);
 
             var secRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 16) };
             secRow.Children.Add(new TextBlock { Text = "長さ", VerticalAlignment = VerticalAlignment.Center });
@@ -4537,6 +4586,7 @@ namespace JRate
             if (promptBox.IsEnabled)
             {
                 request.Prompt = promptBox.Text.Trim();
+                request.BasePrompt = basePrompt;
                 ComfySettings.Prompt = request.Prompt;
             }
             int sel = Math.Max(presetBox.SelectedIndex, 0);
@@ -4557,7 +4607,7 @@ namespace JRate
         // 読めないときは理由を出して「生成する」を押せなくする
         private void ApplyWorkflow()
         {
-            bool hasPrompt = false;
+            bool hasPrompt = false, video = false;
             double? workflowSeconds = null;
             string error = null;
             integerSeconds = false;
@@ -4569,6 +4619,7 @@ namespace JRate
                 if (ComfyVideo.FindNodes(wf, "LoadImage").Count == 0)
                     throw new Exception("ワークフローに「Load Image」(LoadImage) ノードがありません。\n" + workflowPath[sel]);
                 hasPrompt = ComfyVideo.HasPrompt(wf);
+                video = ComfyVideo.IsVideoWorkflow(wf);
                 workflowSeconds = ComfyVideo.GetDuration(wf);
                 integerSeconds = ComfyVideo.DurationIsInteger(wf);
             }
@@ -4584,6 +4635,12 @@ namespace JRate
             promptLabel.Foreground = hasPrompt ? Brushes.Black : Brushes.DimGray;
             promptBox.IsEnabled = hasPrompt;
             promptRow.IsEnabled = hasPrompt;
+
+            basePrompt = hasPrompt ? ComfySettings.BasePromptFor(video) : "";
+            baseHint.Text = "＋ ベースプロンプト (" + (video ? "動画用" : "画像用") + ") : " +
+                            basePrompt.Replace("\r", "").Replace('\n', ' ');
+            baseHint.ToolTip = basePrompt;
+            baseHint.Visibility = basePrompt.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
 
             bool hasSeconds = workflowSeconds != null;
             double cur;

@@ -88,6 +88,18 @@ namespace JRate
         public string ConnectionName = "", Url = "", WorkflowName = "", WorkflowPath = "";
         public string Prompt;      // null = ワークフローに書かれているまま
         public double? Seconds;    // 同上
+        public string BasePrompt = "";   // 生成を始めたときのベースプロンプト (Prompt のあとに続けて送る)
+
+        // ComfyUI に送るプロンプト : プロンプト、改行、ベースプロンプトの順。Prompt が null なら null
+        public string FullPrompt
+        {
+            get
+            {
+                if (Prompt == null) return null;
+                string p = Prompt.Trim(), b = (BasePrompt ?? "").Trim();
+                return p.Length == 0 ? b : b.Length == 0 ? p : p + "\n" + b;
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -171,6 +183,7 @@ namespace JRate
                 d["workflow"] = req.WorkflowName;
                 d["workflowPath"] = req.WorkflowPath;
                 d["prompt"] = req.Prompt;
+                d["basePrompt"] = req.BasePrompt;
                 d["seconds"] = req.Seconds;
                 string line = ComfyVideo.NewSerializer().Serialize(d) + "\r\n";
                 string file = ComfySettings.FilePath("comfy_history.txt");
@@ -229,6 +242,7 @@ namespace JRate
             r.Request.WorkflowPath = ComfySettings.Str(d, "workflowPath");
             object o;
             if (d.TryGetValue("prompt", out o) && o != null) r.Request.Prompt = o.ToString();
+            r.Request.BasePrompt = ComfySettings.Str(d, "basePrompt");
             if (d.TryGetValue("seconds", out o) && o != null) r.Request.Seconds = Convert.ToDouble(o);
             return r;
         }
@@ -328,6 +342,26 @@ namespace JRate
         {
             get { return Load("comfy_prompt.txt") ?? ""; }
             set { Save("comfy_prompt.txt", (value ?? "").Trim()); }
+        }
+
+        // ベースプロンプト。動画用と画像用が 1 つずつ (comfy_base_prompt_video.txt / _image.txt) で、
+        // 毎回プロンプトのあとに続けて送る。どちらを使うかはワークフローで決まる (ComfyVideo.IsVideoWorkflow)。
+        // まだなければ、分ける前の設定 (comfy_base_prompt.txt) を引き継ぐ
+        public static string BasePromptVideo
+        {
+            get { return Load("comfy_base_prompt_video.txt") ?? Load("comfy_base_prompt.txt") ?? ""; }
+            set { Save("comfy_base_prompt_video.txt", (value ?? "").Trim()); }
+        }
+
+        public static string BasePromptImage
+        {
+            get { return Load("comfy_base_prompt_image.txt") ?? Load("comfy_base_prompt.txt") ?? ""; }
+            set { Save("comfy_base_prompt_image.txt", (value ?? "").Trim()); }
+        }
+
+        public static string BasePromptFor(bool video)
+        {
+            return video ? BasePromptVideo : BasePromptImage;
         }
 
         // プロンプトのプリセット。値はプロンプトの本文 (改行があるので 1 件ずつ
@@ -848,6 +882,23 @@ namespace JRate
             object o, t;
             var meta = node.TryGetValue("_meta", out o) ? o as Dictionary<string, object> : null;
             return meta != null && meta.TryGetValue("title", out t) ? t as string ?? "" : "";
+        }
+
+        // 動画を作るワークフローか (そうでなければ画像用として扱う)。
+        // 名前に Video を含むノード (SaveVideo、CreateVideo、～ImageToVideo、VHS_VideoCombine など) か、
+        // 動く画像を保存するノードがあれば動画用
+        public static bool IsVideoWorkflow(Dictionary<string, object> wf)
+        {
+            foreach (var v in wf.Values)
+            {
+                var node = v as Dictionary<string, object>;
+                if (node == null) continue;
+                string ct = ClassType(node);
+                if (ct.IndexOf("video", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    ct == "SaveWEBM" || ct == "SaveAnimatedWEBP" || ct == "SaveAnimatedPNG")
+                    return true;
+            }
+            return false;
         }
 
         // ワークフローにプロンプトを入れる場所があるか

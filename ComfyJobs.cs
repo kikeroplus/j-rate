@@ -246,6 +246,21 @@ namespace JRate
                 Margin = new Thickness(0, 4, 0, 16)
             });
 
+            if (req.BasePrompt.Length > 0)
+            {
+                panel.Children.Add(new TextBlock { Text = "ベースプロンプト (プロンプトのあとに続けて送りました)" });
+                panel.Children.Add(new TextBox
+                {
+                    Text = req.BasePrompt,
+                    IsReadOnly = true,
+                    TextWrapping = TextWrapping.Wrap,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    Height = 70,
+                    Padding = new Thickness(2, 3, 2, 3),
+                    Margin = new Thickness(0, 4, 0, 16)
+                });
+            }
+
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
             var again = new Button
             {
