@@ -187,33 +187,34 @@ namespace JRate
     {
         public const string DefaultUrl = "http://127.0.0.1:8188";
         public const int PresetCount = 10;
+        public const int WorkflowCount = 100;   // ワークフローだけは多く登録できる
 
         // 接続先のプリセット (comfy_presets.txt)。いつも PresetCount 件 (未登録のものは空)
         public static ComfyPreset[] Presets
         {
-            get { return LoadPresets("comfy_presets.txt", "comfy_url.txt", DefaultUrl); }
-            set { SavePresets("comfy_presets.txt", value); }
+            get { return LoadPresets("comfy_presets.txt", "comfy_url.txt", DefaultUrl, PresetCount); }
+            set { SavePresets("comfy_presets.txt", value, PresetCount); }
         }
 
         // 使う接続先の番号 (0 始まり)
         public static int ActivePreset
         {
-            get { return LoadIndex("comfy_preset.txt"); }
+            get { return LoadIndex("comfy_preset.txt", PresetCount); }
             set { Save("comfy_preset.txt", (value + 1).ToString()); }
         }
 
-        // ワークフローのプリセット (comfy_workflows.txt)。
+        // ワークフローのプリセット (comfy_workflows.txt)。いつも WorkflowCount 件 (未登録のものは空)。
         // 値は ComfyUI の「Export (API)」で保存したワークフロー JSON のパス
         public static ComfyPreset[] Workflows
         {
-            get { return LoadPresets("comfy_workflows.txt", "comfy_workflow.txt", ""); }
-            set { SavePresets("comfy_workflows.txt", value); }
+            get { return LoadPresets("comfy_workflows.txt", "comfy_workflow.txt", "", WorkflowCount); }
+            set { SavePresets("comfy_workflows.txt", value, WorkflowCount); }
         }
 
         // 使うワークフローの番号 (0 始まり)
         public static int ActiveWorkflow
         {
-            get { return LoadIndex("comfy_workflow_preset.txt"); }
+            get { return LoadIndex("comfy_workflow_preset.txt", WorkflowCount); }
             set { Save("comfy_workflow_preset.txt", (value + 1).ToString()); }
         }
 
@@ -225,10 +226,10 @@ namespace JRate
 
         // ファイルは 1 行に「番号 <Tab> 名前 <Tab> 値」。
         // まだなければ、プリセットができる前の設定 (legacyFile) を 1 番に引き継ぐ
-        private static ComfyPreset[] LoadPresets(string file, string legacyFile, string legacyDefault)
+        private static ComfyPreset[] LoadPresets(string file, string legacyFile, string legacyDefault, int count)
         {
-            var list = new ComfyPreset[PresetCount];
-            for (int i = 0; i < PresetCount; i++) list[i] = new ComfyPreset();
+            var list = new ComfyPreset[count];
+            for (int i = 0; i < count; i++) list[i] = new ComfyPreset();
             string s = Load(file);
             if (s == null)
             {
@@ -240,26 +241,26 @@ namespace JRate
             {
                 string[] p = line.TrimEnd('\r').Split('\t');
                 int n;
-                if (p.Length < 3 || !int.TryParse(p[0], out n) || n < 1 || n > PresetCount) continue;
+                if (p.Length < 3 || !int.TryParse(p[0], out n) || n < 1 || n > count) continue;
                 list[n - 1].Name = p[1].Trim();
                 list[n - 1].Value = p[2].Trim().TrimEnd('/');
             }
             return list;
         }
 
-        private static void SavePresets(string file, ComfyPreset[] list)
+        private static void SavePresets(string file, ComfyPreset[] list, int count)
         {
             var sb = new StringBuilder();
-            for (int i = 0; i < PresetCount && i < list.Length; i++)
+            for (int i = 0; i < count && i < list.Length; i++)
                 sb.Append(i + 1).Append('\t').Append(OneLine(list[i].Name)).Append('\t')
                   .Append(OneLine(list[i].Value).TrimEnd('/')).Append("\r\n");
             Save(file, sb.ToString());
         }
 
-        private static int LoadIndex(string file)
+        private static int LoadIndex(string file, int count)
         {
             int n;
-            return int.TryParse(Load(file), out n) && n >= 1 && n <= PresetCount ? n - 1 : 0;
+            return int.TryParse(Load(file), out n) && n >= 1 && n <= count ? n - 1 : 0;
         }
 
         private static string OneLine(string s)
@@ -393,6 +394,149 @@ namespace JRate
                 return int.TryParse(Load("comfy_prompt_preset.txt"), out n) && n >= 1 && n <= PresetCount ? n - 1 : -1;
             }
             set { Save("comfy_prompt_preset.txt", (value + 1).ToString()); }
+        }
+
+        // ---------------- エクスポート / インポート ----------------
+        // 生成の設定 (comfy_*.txt) をまとめて 1 つの JSON にする。生成の記録 (comfy_history.txt) は入れない。
+        // ワークフローの JSON は中身も入れておき、インポート先に同じパスのファイルがなければ
+        // %APPDATA%\J-Rate\workflows に書き出して、登録してあるパスをそちらに付け替える
+        private const string ExportKind = "comfy-settings";
+
+        // インポートの直前に、それまでの設定を控えておくファイル (エクスポートと同じ形式)
+        public static string ImportBackupPath
+        {
+            get { return FilePath("backup_before_import.json"); }
+        }
+
+        private static bool IsSettingFile(string name)
+        {
+            if (!name.StartsWith("comfy_") || !name.EndsWith(".txt") || name == "comfy_history.txt") return false;
+            foreach (char c in name)
+                if (!(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_' || c == '.')) return false;
+            return true;
+        }
+
+        private static List<string> SettingFiles()
+        {
+            var list = new List<string>();
+            string dir = Path.GetDirectoryName(FilePath("x"));
+            if (!Directory.Exists(dir)) return list;
+            foreach (string f in Directory.GetFiles(dir, "comfy_*.txt"))
+                if (IsSettingFile(Path.GetFileName(f))) list.Add(f);
+            return list;
+        }
+
+        // 戻り値 : 結果の説明。書き出せなかったときは例外
+        public static string Export(string path)
+        {
+            var files = new Dictionary<string, object>();
+            foreach (string f in SettingFiles()) files[Path.GetFileName(f)] = File.ReadAllText(f);
+
+            // プリセットとセットに登録してあるワークフローの中身
+            var paths = new List<string>();
+            foreach (var p in Workflows) paths.Add(p.Value);
+            foreach (var s in Sets) paths.Add(s.Workflow);
+            var workflows = new List<Dictionary<string, object>>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int missing = 0;
+            foreach (string wf in paths)
+            {
+                if (wf.Length == 0 || !seen.Add(wf)) continue;
+                string text;
+                try { text = File.ReadAllText(wf); }
+                catch { missing++; continue; }
+                var d = new Dictionary<string, object>();
+                d["path"] = wf;
+                d["content"] = text;
+                workflows.Add(d);
+            }
+
+            var root = new Dictionary<string, object>();
+            root["app"] = "J-Rate";
+            root["kind"] = ExportKind;
+            root["version"] = 1;
+            root["exported"] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            root["files"] = files;
+            root["workflows"] = workflows;
+            File.WriteAllText(path, ComfyVideo.NewSerializer().Serialize(root), Encoding.UTF8);
+
+            return "生成の設定をエクスポートしました (ワークフローの JSON " + workflows.Count + " 個を含む" +
+                   (missing > 0 ? "。" + missing + " 個は読めなかったので含めていません" : "") + "): " + path;
+        }
+
+        // 今の設定をすべて置き換える。戻り値 : 結果の説明。読めないファイルのときは例外 (設定は変えない)
+        public static string Import(string path)
+        {
+            Dictionary<string, object> root = null;
+            string json = File.ReadAllText(path);
+            try { root = ComfyVideo.NewSerializer().DeserializeObject(json) as Dictionary<string, object>; }
+            catch { }
+            object o;
+            var files = root != null && root.TryGetValue("files", out o) ? o as Dictionary<string, object> : null;
+            if (files == null || Str(root, "kind") != ExportKind)
+                throw new Exception("J-Rate の生成の設定をエクスポートしたファイルではありません。");
+
+            try { Export(ImportBackupPath); } catch { }
+
+            foreach (string f in SettingFiles()) File.Delete(f);
+            Directory.CreateDirectory(Path.GetDirectoryName(FilePath("x")));
+            foreach (var kv in files)
+                if (IsSettingFile(kv.Key) && kv.Value != null) File.WriteAllText(FilePath(kv.Key), kv.Value.ToString());
+
+            // この PC にないワークフローは書き出して、登録してあるパスを付け替える
+            var moved = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var list = root.TryGetValue("workflows", out o) ? o as object[] : null;
+            foreach (object item in list ?? new object[0])
+            {
+                var d = item as Dictionary<string, object>;
+                if (d == null) continue;
+                string old = Str(d, "path");
+                if (old.Length == 0 || moved.ContainsKey(old)) continue;
+                bool exists = false;
+                try { exists = File.Exists(old); } catch { }
+                if (!exists) moved[old] = RestoreWorkflow(old, Str(d, "content"));
+            }
+            if (moved.Count > 0)
+            {
+                string to;
+                var presets = Workflows;
+                foreach (var p in presets)
+                    if (moved.TryGetValue(p.Value, out to)) p.Value = to;
+                Workflows = presets;
+                var sets = Sets;
+                bool changed = false;
+                foreach (var s in sets)
+                    if (moved.TryGetValue(s.Workflow, out to)) { s.Workflow = to; changed = true; }
+                if (changed) Sets = sets;
+            }
+
+            return "生成の設定をインポートしました。" +
+                   (moved.Count > 0 ? "\n\nこの PC になかったワークフローの JSON " + moved.Count + " 個を次のフォルダに書き出しました。\n" +
+                                      FilePath("workflows") : "");
+        }
+
+        // ワークフローの JSON を %APPDATA%\J-Rate\workflows に書き出してパスを返す。
+        // 同じ名前で中身も同じファイルがあればそれを使い、中身が違えば「名前 (2)」のようにする
+        private static string RestoreWorkflow(string oldPath, string content)
+        {
+            string name = "workflow.json";
+            try
+            {
+                // 他の PC のパスなので、区切りは \ と / のどちらもありうる
+                string n = oldPath.Substring(oldPath.LastIndexOfAny(new[] { '\\', '/' }) + 1);
+                if (n.Length > 0 && n.IndexOfAny(Path.GetInvalidFileNameChars()) < 0) name = n;
+            }
+            catch { }
+            string dir = FilePath("workflows");
+            Directory.CreateDirectory(dir);
+            string file = Path.Combine(dir, name);
+            for (int i = 2; File.Exists(file); i++)
+            {
+                if (File.ReadAllText(file) == content) return file;
+                file = Path.Combine(dir, Path.GetFileNameWithoutExtension(name) + " (" + i + ")" + Path.GetExtension(name));
+            }
+            File.WriteAllText(file, content);
+            return file;
         }
 
         internal static string Str(Dictionary<string, object> d, string key)

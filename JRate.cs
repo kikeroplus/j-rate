@@ -1752,9 +1752,14 @@ namespace JRate
 
         private bool ShowComfySettings()
         {
-            var dlg = new ComfySettingsDialog();
-            dlg.Owner = this;
-            return dlg.ShowDialog() == true;
+            // インポートしたあとは、読み込んだ内容で開き直す
+            for (;;)
+            {
+                var dlg = new ComfySettingsDialog();
+                dlg.Owner = this;
+                bool ok = dlg.ShowDialog() == true;
+                if (!dlg.Imported) return ok;
+            }
         }
 
         // ---------------- フォルダ読み込み ----------------
@@ -3662,6 +3667,9 @@ namespace JRate
         private readonly PresetTab connection, workflow, prompt;
         private readonly TextBlock resultText;
 
+        // インポートして閉じたとき (呼び出し側が、読み込んだ内容で開き直す)
+        public bool Imported { get; private set; }
+
         public ComfySettingsDialog()
         {
             Title = "生成の設定 (ComfyUI)";
@@ -3683,7 +3691,7 @@ namespace JRate
 
             var browse = new Button { Content = "参照...", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0) };
             workflow = new PresetTab(ComfySettings.Workflows,
-                "ワークフローのプリセット (" + count + "ここで選んだものを使います)",
+                "ワークフローのプリセット (" + ComfySettings.WorkflowCount + " 件まで登録できます。ここで選んだものを使います)",
                 "名前 (一覧に出す名前。空ならファイル名を出します)",
                 "ワークフロー (ComfyUI のメニュー「Export (API)」で保存した JSON)",
                 new TextBox { Padding = new Thickness(2, 3, 2, 3) }, browse,
@@ -3741,8 +3749,52 @@ namespace JRate
             var cancel = new Button { Content = "キャンセル", Width = 90, IsCancel = true, Margin = new Thickness(8, 0, 0, 0) };
             buttons.Children.Add(ok);
             buttons.Children.Add(cancel);
-            panel.Children.Add(buttons);
+
+            // 左下 : 生成の設定をまとめてファイルに書き出す / ファイルから読み込む
+            var exportButton = new Button { Content = "エクスポート...", Padding = new Thickness(12, 2, 12, 2) };
+            var importButton = new Button { Content = "インポート...", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0) };
+            var transfer = new StackPanel { Orientation = Orientation.Horizontal };
+            transfer.Children.Add(exportButton);
+            transfer.Children.Add(importButton);
+            var bottom = new DockPanel();
+            DockPanel.SetDock(transfer, Dock.Left);
+            bottom.Children.Add(transfer);
+            bottom.Children.Add(buttons);
+            panel.Children.Add(bottom);
             Content = panel;
+
+            exportButton.Click += delegate
+            {
+                var sfd = new Microsoft.Win32.SaveFileDialog();
+                sfd.Title = "生成の設定をエクスポート";
+                sfd.Filter = "J-Rate の生成設定 (*.json)|*.json";
+                sfd.FileName = "J-Rate-生成設定-" + DateTime.Now.ToString("yyyyMMdd") + ".json";
+                if (sfd.ShowDialog(this) != true) return;
+                try { Result(Brushes.ForestGreen, ComfySettings.Export(sfd.FileName)); }
+                catch (Exception ex) { Result(Brushes.Firebrick, "エクスポートできません: " + ex.Message); }
+            };
+
+            // インポート : 今の設定をすべて置き換えるので確かめる。終わったら読み込んだ内容で開き直す
+            importButton.Click += delegate
+            {
+                var ofd = new Microsoft.Win32.OpenFileDialog();
+                ofd.Title = "生成の設定をインポート";
+                ofd.Filter = "J-Rate の生成設定 (*.json)|*.json|すべてのファイル (*.*)|*.*";
+                if (ofd.ShowDialog(this) != true) return;
+                string text = "今の生成の設定 (接続先・ワークフロー・プロンプト・セットなど) を、" +
+                              "このファイルの内容にすべて置き換えます。よろしいですか？\n\n" + ofd.FileName +
+                              "\n\n今の設定は次のファイルに控えを残します。\n" + ComfySettings.ImportBackupPath;
+                if (MessageBox.Show(this, text, Title, MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
+                    return;
+                try
+                {
+                    string done = ComfySettings.Import(ofd.FileName);
+                    MessageBox.Show(this, done, Title, MessageBoxButton.OK, MessageBoxImage.Information);
+                    Imported = true;
+                    Close();
+                }
+                catch (Exception ex) { Result(Brushes.Firebrick, "インポートできません: " + ex.Message); }
+            };
 
             connection.Box.SelectedIndex = ComfySettings.ActivePreset;
             workflow.Box.SelectedIndex = ComfySettings.ActiveWorkflow;
