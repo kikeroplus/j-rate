@@ -109,6 +109,6 @@
     <TextBlock x:Name="GridLoadText" DockPanel.Dock="Right" Foreground="#999999" Margin="10,4" FontSize="11"
                VerticalAlignment="Center" Visibility="Collapsed"/>
     <TextBlock Foreground="#AAAAAA" Margin="10,4" FontSize="12" TextTrimming="CharacterEllipsis"
-               Text="クリック: 表示・再生 / Ctrl・Shift+クリック: 複数選択 / ダブルクリック・Enter: メインウインドウへ / 1〜5: 評価 / Del: 削除 / Ctrl+ホイール: 大きさ / Esc: 閉じる"/>
+               Text="クリック: 表示・再生 / Ctrl・Shift+クリック: 複数選択 / Ctrl+D: 複数選択を解除 /ダブルクリック・Enter: メインウインドウへ / 1〜5: 評価 / Del: 削除 / Ctrl+ホイール: 大きさ / Esc: 閉じる"/>
   </DockPanel>
 </Grid>

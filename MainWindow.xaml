@@ -192,6 +192,9 @@
       <Rectangle Width="1" Fill="#555555" Margin="10,6"/>
       <Button x:Name="FilterAll" Content="すべて表示" Style="{StaticResource Btn}"/>
       <Rectangle Width="1" Fill="#555555" Margin="10,6"/>
+      <Button x:Name="DeselectButton" Content="選択解除" Style="{StaticResource Btn}" ToolTipService.ShowOnDisabled="True"
+              ToolTip="複数選択を解除して、表示中の 1 つだけを選択した状態にする (Ctrl+D)"/>
+      <Rectangle Width="1" Fill="#555555" Margin="10,6"/>
       <Button x:Name="CopyButton" Content="表示中をコピー..." Style="{StaticResource Btn}" ToolTipService.ShowOnDisabled="True"
               ToolTip="サムネール一覧に表示中の画像をすべて別のフォルダにコピー (★フィルター選択時のみ)"/>
       <Button x:Name="MoveButton" Content="表示中を移動..." Style="{StaticResource Btn}" ToolTipService.ShowOnDisabled="True"

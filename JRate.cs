@@ -961,7 +961,7 @@ namespace JRate
 
         private const int ThumbSize = 192;
         private const int CacheLimit = 8;
-        private const string HelpText = "1〜5: 評価 / 0: 評価解除 / Del: ごみ箱へ削除 / ← →・ホイール: 移動 / Ctrl・Shift+クリック: 複数選択 /Ctrl+ホイール: 拡大縮小 / Space: 動画の再生・一時停止 / Home End: 先頭・末尾 / Ctrl+O: フォルダを開く / Ctrl+G: グリッド一覧 / Ctrl+J: 生成ジョブ";
+        private const string HelpText = "1〜5: 評価 / 0: 評価解除 / Del: ごみ箱へ削除 / ← →・ホイール: 移動 / Ctrl・Shift+クリック: 複数選択 / Ctrl+D: 複数選択を解除 / Ctrl+ホイール: 拡大縮小 / Space: 動画の再生・一時停止 / Home End: 先頭・末尾 / Ctrl+O: フォルダを開く / Ctrl+G: グリッド一覧 / Ctrl+J: 生成ジョブ";
 
         private readonly ObservableCollection<ImageItem> items = new ObservableCollection<ImageItem>();
         private readonly ICollectionView view;
@@ -981,7 +981,7 @@ namespace JRate
         private ToggleButton modeAtLeast, modeAtMost, modeOnly;
         private ToggleButton typeImage, typeVideo;
         private CheckBox autoNext;
-        private Button copyButton, moveButton;
+        private Button copyButton, moveButton, deselectButton;
         private FrameworkElement toolbar, loadPanel;
         private TextBlock loadText;
         private ProgressBar loadBar;
@@ -1121,6 +1121,8 @@ namespace JRate
             ((Button)root.FindName("ComfySettingsButton")).Click += delegate { ShowComfySettings(); };
             ((Button)root.FindName("OpenButton")).Click += delegate { BrowseFolder(); };
             ((Button)root.FindName("GridButton")).Click += delegate { ShowGrid(); };
+            deselectButton = (Button)root.FindName("DeselectButton");
+            deselectButton.Click += delegate { ClearMultiSelect(); };
             copyButton = (Button)root.FindName("CopyButton");
             moveButton = (Button)root.FindName("MoveButton");
             copyButton.Click += delegate { Transfer(false); };
@@ -1414,6 +1416,9 @@ namespace JRate
             menu.Items.Add(clear);
             menu.Items.Add(new Separator());
 
+            var deselect = new MenuItem { Header = "複数選択を解除", InputGestureText = "Ctrl+D" };
+            deselect.Click += delegate { ClearMultiSelect(); };
+            menu.Items.Add(deselect);
             var del = new MenuItem { Header = "ファイルを削除 (ごみ箱へ)", InputGestureText = "Del" };
             del.Click += delegate { if (!busy) DeleteCurrent(); };
             menu.Items.Add(del);
@@ -1426,6 +1431,7 @@ namespace JRate
                 // 複数選択しているときは、評価・削除・生成は選択しているものすべてが対象
                 var selected = SelectedItems();
                 bool multi = selected.Count > 1;
+                deselect.IsEnabled = multi;
                 int images = selected.Count(x => !x.IsVideo);
                 clear.IsEnabled = selected.Any(x => x.Rating > 0);
                 makeVideo.Header = multi ? "選択中の画像を生成する (" + images + " 枚)..." : "生成する (ComfyUI)";
@@ -2037,6 +2043,13 @@ namespace JRate
             else UpdateInfo();   // 選択数の表示
         }
 
+        // 複数選択を解除して、表示している項目だけを選択した状態にする
+        private void ClearMultiSelect()
+        {
+            if (busy || current == null || thumbList.SelectedItems.Count <= 1) return;
+            thumbList.SelectedItem = current;
+        }
+
         private void SetCurrent(ImageItem item)
         {
             if (item == current) return;
@@ -2198,6 +2211,7 @@ namespace JRate
         {
             var item = Current;
             int selected = thumbList.SelectedItems.Count;
+            deselectButton.IsEnabled = selected > 1;
             // 生成できるのは画像だけ (複数選択のときは、その中に画像があれば)
             generateButton.IsEnabled = item != null && (selected > 1 ? SelectedItems().Any(x => !x.IsVideo) : !item.IsVideo);
             // 画像が 1 枚も表示されていないときの案内。「ありません」は読み込みが終わってから出す。
@@ -2535,6 +2549,12 @@ namespace JRate
             if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.G)
             {
                 ShowGrid();
+                e.Handled = true;
+                return;
+            }
+            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.D)
+            {
+                ClearMultiSelect();
                 e.Handled = true;
                 return;
             }
@@ -3332,8 +3352,8 @@ namespace JRate
                 var lbi = FindAncestor<ListBoxItem>(e.OriginalSource as DependencyObject);
                 pressed = lbi != null ? lbi.DataContext as ImageItem : null;
                 start = e.GetPosition(list);
-                // 複数選択のうちの 1 つを押したときは、まとめてドラッグできるよう選択をそのままにして、
-                // ドラッグせずに離したときにその 1 つだけの選択にする (エクスプローラーと同じ)
+                // 複数選択のうちの 1 つを押したときは、選択をそのままにして表示だけをその項目に切り替える
+                // (まとめてドラッグもできる。複数選択の解除は、選択していない項目のクリックか Ctrl+D)
                 deferred = pressed != null && e.ClickCount == 1 && Keyboard.Modifiers == ModifierKeys.None &&
                            list.SelectedItems.Count > 1 && list.SelectedItems.Contains(pressed);
                 if (deferred)
@@ -3345,7 +3365,6 @@ namespace JRate
             };
             list.PreviewMouseLeftButtonUp += delegate
             {
-                if (deferred && pressed != null) list.SelectedItem = pressed;
                 pressed = null;
                 deferred = false;
             };
