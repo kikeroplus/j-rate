@@ -99,6 +99,19 @@ namespace JRate
             OnPropertyChanged("GridImage");
         }
 
+        // メイン画面に表示中の項目 (一覧で太い枠にする)
+        private bool isCurrent;
+        public bool IsCurrent
+        {
+            get { return isCurrent; }
+            set
+            {
+                if (isCurrent == value) return;
+                isCurrent = value;
+                OnPropertyChanged("IsCurrent");
+            }
+        }
+
         public static string StarText(int r)
         {
             return new string('★', r) + new string('☆', 5 - r);
@@ -948,7 +961,7 @@ namespace JRate
 
         private const int ThumbSize = 192;
         private const int CacheLimit = 8;
-        private const string HelpText = "1〜5: 評価 / 0: 評価解除 / Del: ごみ箱へ削除 / ← →・ホイール: 移動 / Ctrl+ホイール: 拡大縮小 / Space: 動画の再生・一時停止 / Home End: 先頭・末尾 / Ctrl+O: フォルダを開く / Ctrl+G: グリッド一覧 / Ctrl+J: 生成ジョブ";
+        private const string HelpText = "1〜5: 評価 / 0: 評価解除 / Del: ごみ箱へ削除 / ← →・ホイール: 移動 / Ctrl・Shift+クリック: 複数選択 /Ctrl+ホイール: 拡大縮小 / Space: 動画の再生・一時停止 / Home End: 先頭・末尾 / Ctrl+O: フォルダを開く / Ctrl+G: グリッド一覧 / Ctrl+J: 生成ジョブ";
 
         private readonly ObservableCollection<ImageItem> items = new ObservableCollection<ImageItem>();
         private readonly ICollectionView view;
@@ -1027,6 +1040,9 @@ namespace JRate
         private SortMode sortMode = SortMode.NameAsc;
         private ComboBox sortBox;
         private bool resorting;                // 並べ替え中は選択の変化を無視する
+        private ImageItem current;             // メイン画面に表示している項目 (複数選択のときは最後にクリックしたもの)
+        private ImageItem clicked;             // マウスで押された項目 (その選択の変更が終わるまで)
+        private bool mirroring;                // サムネール一覧とグリッド一覧の選択を合わせている間は、選択の変化を無視する
         private int loadVersion;
         private volatile int folderGeneration;
 
@@ -1118,7 +1134,7 @@ namespace JRate
             view.Filter = o => Matches((ImageItem)o);
             InitSort((ComboBox)root.FindName("SortBox"));
             thumbList.ItemsSource = view;
-            thumbList.SelectionChanged += delegate { OnSelectionChanged(); };
+            EnableMultiSelect(thumbList);
             thumbList.PreviewMouseWheel += OnThumbWheel;
             EnableFileDrag(thumbList);
             mainArea = (FrameworkElement)root.FindName("MainArea");
@@ -1367,7 +1383,7 @@ namespace JRate
             makeVideo.Click += delegate { GenerateCurrent(); };
             menu.Items.Add(makeVideo);
             var makeAll = new MenuItem { Header = "表示中の画像をまとめて生成する..." };
-            makeAll.Click += delegate { Generate(ShownImages(), null); };
+            makeAll.Click += delegate { Generate(ShownImages(), null, "表示中の画像"); };
             menu.Items.Add(makeAll);
             var genInfo = new MenuItem { Header = "生成時の設定..." };
             genInfo.Click += delegate
@@ -1407,8 +1423,14 @@ namespace JRate
             {
                 var it = Current;
                 for (int i = 1; i <= 5; i++) ratingItems[i].IsChecked = it != null && it.Rating == i;
-                clear.IsEnabled = it != null && it.Rating > 0;
-                makeVideo.IsEnabled = it != null && !it.IsVideo;
+                // 複数選択しているときは、評価・削除・生成は選択しているものすべてが対象
+                var selected = SelectedItems();
+                bool multi = selected.Count > 1;
+                int images = selected.Count(x => !x.IsVideo);
+                clear.IsEnabled = selected.Any(x => x.Rating > 0);
+                makeVideo.Header = multi ? "選択中の画像を生成する (" + images + " 枚)..." : "生成する (ComfyUI)";
+                makeVideo.IsEnabled = images > 0;
+                del.Header = multi ? "選択中の " + selected.Count + " 個のファイルを削除 (ごみ箱へ)" : "ファイルを削除 (ごみ箱へ)";
                 int shown = ShownImages().Count;
                 makeAll.Header = "表示中の画像をまとめて生成する (" + shown + " 枚)...";
                 makeAll.IsEnabled = shown > 0;
@@ -1435,11 +1457,11 @@ namespace JRate
         private JobWindow jobWindow;
         private Button jobsButton, generateButton;
 
-        // 表示している画像から生成する (動画のときは何もしない)
+        // 表示している画像から生成する (動画のときは何もしない)。複数選択しているときは、選択している画像すべてから
         private void GenerateCurrent()
         {
-            var it = Current;
-            if (it != null && !it.IsVideo) Generate(new List<string> { it.Path }, null);
+            if (Current == null) return;
+            Generate(SelectedItems().Where(x => !x.IsVideo).Select(x => x.Path).ToList(), null, "選択中の画像");
         }
 
         // 表示中の画像 (動画は除く) を表示順に
@@ -1451,6 +1473,12 @@ namespace JRate
         // 設定を聞いてから、sources の画像をジョブに登録する。
         // prefill は欄の初期値 (null なら前回の値)
         private void Generate(List<string> sources, GenRequest prefill)
+        {
+            Generate(sources, prefill, "");
+        }
+
+        // what は、複数の画像のときにダイアログの題に出す対象の呼び名 (「表示中の画像」など)
+        private void Generate(List<string> sources, GenRequest prefill, string what)
         {
             if (sources.Count == 0) return;
             string workflow = ComfySettings.WorkflowPath;
@@ -1469,7 +1497,7 @@ namespace JRate
             {
                 string title = sources.Count == 1
                     ? "生成する - " + System.IO.Path.GetFileName(sources[0])
-                    : "まとめて生成する - 表示中の画像 " + sources.Count + " 枚";
+                    : "まとめて生成する - " + what + " " + sources.Count + " 枚";
                 Window owner = gridWindow != null && gridWindow.IsActive ? (Window)gridWindow : this;
                 ComfyPromptDialog dlg;
                 for (;;)
@@ -1589,7 +1617,9 @@ namespace JRate
                     if (first == null) first = it;
                 }
                 // 完成したファイルへ移動 (まとめて生成のときは、次々に切り替わってしまうので移動しない)
-                if (!job.Batch && ComfySettings.JumpToResult && first != null && !busy && thumbList.Items.Contains(first))
+                // 複数選択しているときも、選択が解除されてしまうので移動しない
+                if (!job.Batch && ComfySettings.JumpToResult && first != null && !busy && thumbList.SelectedItems.Count <= 1 &&
+                    thumbList.Items.Contains(first))
                     thumbList.SelectedItem = first;
             }
 
@@ -1939,16 +1969,118 @@ namespace JRate
 
         private ImageItem Current
         {
-            get { return thumbList.SelectedItem as ImageItem; }
+            get { return current; }
         }
 
-        private void OnSelectionChanged()
+        // 表示している項目の、一覧での位置 (なければ -1)
+        private int CurrentIndex
         {
-            if (resorting) return;
-            var item = Current;
-            if (item != null) thumbList.ScrollIntoView(item);
-            SyncGridSelection();
+            get { return current != null ? thumbList.Items.IndexOf(current) : -1; }
+        }
+
+        // 選択している項目を表示順に (評価・削除・ドラッグ・生成の対象)
+        private List<ImageItem> SelectedItems()
+        {
+            var sel = thumbList.SelectedItems;
+            var result = new List<ImageItem>();
+            if (sel.Count == 1) result.Add((ImageItem)sel[0]);
+            else if (sel.Count > 1)
+            {
+                var set = new HashSet<object>(sel.Cast<object>());
+                foreach (ImageItem it in thumbList.Items) if (set.Contains(it)) result.Add(it);
+            }
+            return result;
+        }
+
+        // Ctrl / Shift + クリックで複数選択できるようにする (サムネール一覧とグリッド一覧の両方)。
+        // メイン画面に表示するのは、最後にクリックした項目。
+        private void EnableMultiSelect(ListBox list)
+        {
+            list.SelectionMode = SelectionMode.Extended;
+            list.SelectionChanged += delegate(object s, SelectionChangedEventArgs e)
+            {
+                if (e.OriginalSource == list) OnSelectionChanged(list, e);
+            };
+            list.PreviewMouseDown += delegate(object s, MouseButtonEventArgs e)
+            {
+                var lbi = FindAncestor<ListBoxItem>(e.OriginalSource as DependencyObject);
+                clicked = lbi != null ? lbi.DataContext as ImageItem : null;
+            };
+            // 選択済みの項目を押したとき (選択は変わらない) も、その項目を表示する
+            list.AddHandler(UIElement.MouseDownEvent, new MouseButtonEventHandler(delegate
+            {
+                var it = clicked;
+                clicked = null;
+                if (it != null && thumbList.SelectedItems.Contains(it)) SetCurrent(it);
+            }), true);
+        }
+
+        private void OnSelectionChanged(ListBox source, SelectionChangedEventArgs e)
+        {
+            if (resorting || mirroring) return;
+            MirrorSelection(source, source == thumbList ? gridList : thumbList);
+
+            var sel = thumbList.SelectedItems;
+            if (sel.Count == 0 && clicked != null && thumbList.Items.Contains(clicked))
+            {
+                // Ctrl+クリックで最後の 1 つの選択を外したときは、何も表示されなくなるので選択を戻す
+                thumbList.SelectedItem = clicked;
+                return;
+            }
+            ImageItem next;
+            if (clicked != null && sel.Contains(clicked)) next = clicked;
+            else if (e.AddedItems.Count == 1) next = e.AddedItems[0] as ImageItem;
+            else if (current != null && sel.Contains(current)) next = current;
+            else next = thumbList.SelectedItem as ImageItem;
+
+            if (next != current) SetCurrent(next);
+            else UpdateInfo();   // 選択数の表示
+        }
+
+        private void SetCurrent(ImageItem item)
+        {
+            if (item == current) return;
+            if (current != null) current.IsCurrent = false;
+            current = item;
+            if (item != null)
+            {
+                item.IsCurrent = true;
+                thumbList.ScrollIntoView(item);
+                if (gridList != null) gridList.ScrollIntoView(item);
+            }
             ShowCurrent();
+        }
+
+        // from の選択を to にも反映する (サムネール一覧 ⇔ グリッド一覧)
+        private void MirrorSelection(ListBox from, ListBox to)
+        {
+            if (from == null || to == null) return;
+            mirroring = true;
+            try
+            {
+                var src = from.SelectedItems;
+                var dst = to.SelectedItems;
+                if (src.Count == 0)
+                {
+                    if (dst.Count > 0) to.UnselectAll();
+                }
+                else if (src.Count == 1)
+                {
+                    if (dst.Count != 1 || dst[0] != src[0]) to.SelectedItem = src[0];
+                }
+                else if (src.Count == from.Items.Count)
+                {
+                    if (dst.Count != src.Count) to.SelectAll();
+                }
+                else
+                {
+                    var want = new HashSet<object>(src.Cast<object>());
+                    foreach (object x in dst.Cast<object>().Where(x => !want.Contains(x)).ToList()) dst.Remove(x);
+                    var have = new HashSet<object>(dst.Cast<object>());
+                    foreach (object x in src) if (!have.Contains(x)) dst.Add(x);
+                }
+            }
+            finally { mirroring = false; }
         }
 
         private async void ShowCurrent()
@@ -2022,7 +2154,7 @@ namespace JRate
         // 前後の画像を先読み
         private async void Prefetch(int ver)
         {
-            int idx = thumbList.SelectedIndex;
+            int idx = CurrentIndex;
             foreach (int offset in new[] { 1, -1, 2 })
             {
                 if (ver != loadVersion) return;
@@ -2065,7 +2197,9 @@ namespace JRate
         private void UpdateInfo()
         {
             var item = Current;
-            generateButton.IsEnabled = item != null && !item.IsVideo;   // 生成できるのは画像だけ
+            int selected = thumbList.SelectedItems.Count;
+            // 生成できるのは画像だけ (複数選択のときは、その中に画像があれば)
+            generateButton.IsEnabled = item != null && (selected > 1 ? SelectedItems().Any(x => !x.IsVideo) : !item.IsVideo);
             // 画像が 1 枚も表示されていないときの案内。「ありません」は読み込みが終わってから出す。
             emptyText.Visibility = thumbList.Items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             if (thumbList.Items.Count == 0)
@@ -2087,9 +2221,10 @@ namespace JRate
                 ratingBadge.Visibility = Visibility.Visible;
                 infoBadge.Visibility = Visibility.Visible;
                 DrawStars(item.Rating, false);
-                infoText.Text = (thumbList.SelectedIndex + 1) + " / " + thumbList.Items.Count + "    " + item.FileName
+                infoText.Text = (CurrentIndex + 1) + " / " + thumbList.Items.Count + "    " + item.FileName
                     + (item.PixelWidth > 0 ? "    " + item.PixelWidth + " × " + item.PixelHeight : "")
-                    + (zoom > 1 ? "    拡大 ×" + zoom.ToString("0.0") : "");
+                    + (zoom > 1 ? "    拡大 ×" + zoom.ToString("0.0") : "")
+                    + (selected > 1 ? "    " + selected + " 個を選択中" : "");
             }
 
             string filter = "フィルター: なし";
@@ -2152,12 +2287,13 @@ namespace JRate
         {
             UpdateFilterButtons();
             var cur = Current;
-            int idx = thumbList.SelectedIndex;
+            int idx = CurrentIndex;
             view.Refresh();
 
             if (cur != null && Matches(cur))
             {
-                thumbList.SelectedItem = cur;
+                // 複数選択は、条件に合うものが選ばれたまま残る
+                if (!thumbList.SelectedItems.Contains(cur)) thumbList.SelectedItem = cur;
             }
             else if (thumbList.Items.Count > 0)
             {
@@ -2198,10 +2334,10 @@ namespace JRate
             try
             {
                 ((ListCollectionView)view).CustomSort = new ItemComparer(mode);
-                if (cur != null) thumbList.SelectedItem = cur;
+                // 通常は同じ項目が選ばれたまま (複数選択も)
+                if (cur != null && !thumbList.SelectedItems.Contains(cur)) thumbList.SelectedItem = cur;
             }
             finally { resorting = false; }
-            if (Current != cur) ShowCurrent();   // 念のため (通常は同じ項目が選ばれたまま)
             if (Current != null) thumbList.ScrollIntoView(Current);
             SyncGridSelection();
             UpdateInfo();
@@ -2247,31 +2383,55 @@ namespace JRate
                 StopVideo();
             }
 
+            // 複数選択しているときは、選択しているものすべてに同じ評価を付ける
+            var targets = SelectedItems();
+            if (!targets.Contains(item)) targets.Add(item);
+            int done = 0;
+            string error = null;
+            if (targets.Count > 1) Mouse.OverrideCursor = Cursors.Wait;
             try
             {
-                // 評価を書き込むとファイルの更新日時が今の時刻になるので、元に戻す (更新日時順の並びが崩れないように)
-                DateTime modified = File.GetLastWriteTimeUtc(item.Path);
-                ShellRating.Write(item.Path, stars);
-                try { File.SetLastWriteTimeUtc(item.Path, modified); }
-                catch { }
+                foreach (var t in targets)
+                {
+                    try
+                    {
+                        // 評価を書き込むとファイルの更新日時が今の時刻になるので、元に戻す (更新日時順の並びが崩れないように)
+                        DateTime modified = File.GetLastWriteTimeUtc(t.Path);
+                        ShellRating.Write(t.Path, stars);
+                        try { File.SetLastWriteTimeUtc(t.Path, modified); }
+                        catch { }
+                    }
+                    catch (Exception ex)
+                    {
+                        if (error == null) error = t.FileName + " - " + ex.Message;
+                        continue;
+                    }
+                    t.Rating = stars;
+                    done++;
+                }
             }
-            catch (Exception ex)
+            finally { Mouse.OverrideCursor = null; }
+
+            string label = stars == 0 ? "未評価" : "★" + stars;
+            if (targets.Count == 1)
+                statusText.Text = error != null ? "評価を書き込めません: " + error : item.FileName + " を " + label + " にしました";
+            else
+                statusText.Text = done + " 個を " + label + " にしました"
+                    + (error != null ? " / " + (targets.Count - done) + " 個は書き込めません: " + error : "");
+            if (done == 0)
             {
-                statusText.Text = "評価を書き込めません: " + item.FileName + " - " + ex.Message;
                 if (reopen) OpenVideo(item, resumeAt, resumePlay);
                 return;
             }
-            item.Rating = stars;
-            statusText.Text = item.FileName + " を " + (stars == 0 ? "未評価" : "★" + stars) + " にしました";
 
-            if (!Matches(item))
+            if (targets.Any(t => !Matches(t)))
             {
                 ApplyFilter();   // 条件から外れた → 一覧から消えて次の画像へ
             }
             else
             {
                 UpdateInfo();
-                if (autoNext.IsChecked == true) Move(1);
+                if (autoNext.IsChecked == true && targets.Count == 1) Move(1);   // 複数選択のときは選択を残す
             }
             // 別の画像・動画に移らなかったら続きから再生
             if (reopen && Current == item && videoPath == null) OpenVideo(item, resumeAt, resumePlay);
@@ -2284,7 +2444,12 @@ namespace JRate
         {
             var item = Current;
             if (item == null) return;
-            int idx = thumbList.SelectedIndex;
+            if (thumbList.SelectedItems.Count > 1)
+            {
+                DeleteSelected();
+                return;
+            }
+            int idx = CurrentIndex;
             if (item.IsVideo) StopVideo();   // 再生中のファイルを手放す
 
             bool aborted;
@@ -2306,11 +2471,51 @@ namespace JRate
             statusText.Text = item.FileName + " をごみ箱に移動しました";
         }
 
+        // 選択している複数のファイルをまとめてごみ箱へ送る (1 つのときと違い、確認してから)
+        private void DeleteSelected()
+        {
+            var targets = SelectedItems();
+            Window owner = gridWindow != null && gridWindow.IsActive ? (Window)gridWindow : this;
+            if (MessageBox.Show(owner, "選択している " + targets.Count + " 個のファイルをごみ箱に移動しますか？", "J-Rate",
+                                MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
+                return;
+            int idx = thumbList.Items.IndexOf(targets[0]);
+            bool wasVideo = videoPath != null;
+            StopVideo();   // 再生中のファイルを手放す
+
+            bool aborted;
+            int rc = RecycleBin.Send(new WindowInteropHelper(this).Handle,
+                                     string.Join("\0", targets.Select(t => t.Path)), out aborted);
+            var gone = targets.Where(t => !File.Exists(t.Path)).ToList();
+            foreach (var it in gone)
+            {
+                if (cache.Remove(it.Path)) cacheOrder.Remove(it.Path);
+                items.Remove(it);
+            }
+            if (gone.Count > 0 && thumbList.Items.Count > 0)
+                thumbList.SelectedIndex = Math.Max(0, Math.Min(idx, thumbList.Items.Count - 1));
+            // 表示していた動画が消えずに残った → 止めたので開き直す
+            if (wasVideo && videoPath == null && Current != null && Current.IsVideo) ShowCurrent();
+
+            if (gone.Count == targets.Count) statusText.Text = gone.Count + " 個のファイルをごみ箱に移動しました";
+            else if (gone.Count > 0) statusText.Text = gone.Count + " 個のファイルをごみ箱に移動しました (" + (targets.Count - gone.Count) + " 個は削除できませんでした)";
+            else statusText.Text = rc == 0 || aborted ? "削除を取り消しました" : "削除できません (エラー " + rc + ")";
+        }
+
         private void Move(int delta)
         {
             int count = thumbList.Items.Count;
             if (count == 0) return;
-            int idx = thumbList.SelectedIndex < 0 ? 0 : thumbList.SelectedIndex + delta;
+            if (thumbList.SelectedItems.Count > 1)
+            {
+                // 複数選択しているときは、選択を残したまま、選択しているものの中だけで移動する
+                var sel = SelectedItems();
+                int pos = sel.IndexOf(current);
+                pos = pos < 0 ? 0 : pos + delta;
+                SetCurrent(sel[Math.Max(0, Math.Min(pos, sel.Count - 1))]);
+                return;
+            }
+            int idx = CurrentIndex < 0 ? 0 : CurrentIndex + delta;
             thumbList.SelectedIndex = Math.Max(0, Math.Min(idx, count - 1));
         }
 
@@ -2374,10 +2579,13 @@ namespace JRate
                 case Key.PageUp:
                     Move(-1); e.Handled = true; break;
                 case Key.Home:
-                    if (thumbList.Items.Count > 0) thumbList.SelectedIndex = 0;
+                    // 複数選択しているときは、選択しているものの先頭・末尾 (Move が範囲内に収める)
+                    if (thumbList.SelectedItems.Count > 1) Move(-thumbList.Items.Count);
+                    else if (thumbList.Items.Count > 0) thumbList.SelectedIndex = 0;
                     e.Handled = true; break;
                 case Key.End:
-                    if (thumbList.Items.Count > 0) thumbList.SelectedIndex = thumbList.Items.Count - 1;
+                    if (thumbList.SelectedItems.Count > 1) Move(thumbList.Items.Count);
+                    else if (thumbList.Items.Count > 0) thumbList.SelectedIndex = thumbList.Items.Count - 1;
                     e.Handled = true; break;
             }
         }
@@ -2873,8 +3081,8 @@ namespace JRate
             ApplyGridSize();
 
             gridList.ItemsSource = view;
-            gridList.SelectedItem = Current;
-            gridList.SelectionChanged += delegate { OnGridSelectionChanged(); };
+            EnableMultiSelect(gridList);
+            MirrorSelection(thumbList, gridList);
             gridList.MouseDoubleClick += delegate(object s, MouseButtonEventArgs e)
             {
                 if (e.ChangedButton == MouseButton.Left && IsOnGridItem(e.OriginalSource as DependencyObject))
@@ -2901,7 +3109,9 @@ namespace JRate
             w.Closing += delegate { SaveGridBounds(w); };
             w.Closed += delegate
             {
-                gridList.ItemsSource = null;   // 共有している一覧から切り離す
+                mirroring = true;              // 切り離しで選択が空になっても、メインウインドウ側には反映しない
+                try { gridList.ItemsSource = null; }   // 共有している一覧から切り離す
+                finally { mirroring = false; }
                 gridWindow = null;
                 gridRoot = null;
                 gridList = null;
@@ -2923,21 +3133,12 @@ namespace JRate
             gridCountText.Text = countText.Text;
         }
 
-        // グリッドでクリック (右クリック・キー操作も) された項目をメインウインドウで表示する
-        private void OnGridSelectionChanged()
-        {
-            if (resorting || gridList == null) return;
-            var it = gridList.SelectedItem as ImageItem;
-            if (it != null && it != Current) thumbList.SelectedItem = it;
-        }
-
-        // メインウインドウ側で選択が変わったらグリッドの選択も合わせる
+        // グリッドの選択をメインウインドウ側に合わせる (普段は OnSelectionChanged が双方向に合わせている)
         private void SyncGridSelection()
         {
             if (gridList == null) return;
-            var it = Current;
-            if (gridList.SelectedItem != it) gridList.SelectedItem = it;
-            if (it != null) gridList.ScrollIntoView(it);
+            MirrorSelection(thumbList, gridList);
+            if (Current != null) gridList.ScrollIntoView(Current);
         }
 
         private void ActivateMain()
@@ -2966,8 +3167,8 @@ namespace JRate
                 {
                     case Key.Up:
                     case Key.Down:
-                        // 上下は 1 行分移動
-                        Move((e.Key == Key.Down ? 1 : -1) * GridColumns());
+                        // 上下は 1 行分移動 (複数選択しているときは、選択しているものの前後へ)
+                        Move((e.Key == Key.Down ? 1 : -1) * (thumbList.SelectedItems.Count > 1 ? 1 : GridColumns()));
                         e.Handled = true;
                         return;
                     case Key.Enter:
@@ -3124,14 +3325,30 @@ namespace JRate
         private void EnableFileDrag(ListBox list)
         {
             ImageItem pressed = null;
+            bool deferred = false;
             Point start = new Point();
             list.PreviewMouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
             {
                 var lbi = FindAncestor<ListBoxItem>(e.OriginalSource as DependencyObject);
                 pressed = lbi != null ? lbi.DataContext as ImageItem : null;
                 start = e.GetPosition(list);
+                // 複数選択のうちの 1 つを押したときは、まとめてドラッグできるよう選択をそのままにして、
+                // ドラッグせずに離したときにその 1 つだけの選択にする (エクスプローラーと同じ)
+                deferred = pressed != null && e.ClickCount == 1 && Keyboard.Modifiers == ModifierKeys.None &&
+                           list.SelectedItems.Count > 1 && list.SelectedItems.Contains(pressed);
+                if (deferred)
+                {
+                    e.Handled = true;
+                    clicked = null;
+                    SetCurrent(pressed);   // 表示は押した項目に切り替える
+                }
             };
-            list.PreviewMouseLeftButtonUp += delegate { pressed = null; };
+            list.PreviewMouseLeftButtonUp += delegate
+            {
+                if (deferred && pressed != null) list.SelectedItem = pressed;
+                pressed = null;
+                deferred = false;
+            };
             list.PreviewMouseMove += delegate(object s, MouseEventArgs e)
             {
                 if (pressed == null) return;
@@ -3143,8 +3360,13 @@ namespace JRate
                 pressed = null;
                 if (busy || !File.Exists(item.Path)) return;
 
+                // 選択しているものを押したのなら、選択しているファイルすべてを渡す
                 var files = new System.Collections.Specialized.StringCollection();
-                files.Add(item.Path);
+                if (thumbList.SelectedItems.Contains(item))
+                {
+                    foreach (var it in SelectedItems()) if (File.Exists(it.Path)) files.Add(it.Path);
+                }
+                else files.Add(item.Path);
                 var data = new DataObject();
                 data.SetFileDropList(files);
                 draggingOut = true;
@@ -3267,7 +3489,7 @@ namespace JRate
             toolbar.IsEnabled = false;
             folderTree.IsEnabled = false;
             if (gridList != null) gridList.IsEnabled = false;
-            int selectedIndex = thumbList.SelectedIndex;
+            int selectedIndex = CurrentIndex;
             if (move)
             {
                 // 表示中・先読み中の画像を手放す
