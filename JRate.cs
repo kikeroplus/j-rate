@@ -4308,8 +4308,13 @@ namespace JRate
                 var wf = ComfyVideo.LoadWorkflow(ComfyVideo.NewSerializer(), path);
                 int n = ComfyVideo.FindNodes(wf, "LoadImage").Count;
                 if (n == 0) throw new Exception("ワークフローに「Load Image」(LoadImage) ノードがありません。");
+                string problem = ComfyVideo.PromptSlotProblem(wf);
+                if (problem != null) throw new Exception(problem);
+                int slots = ComfyVideo.PromptSlotCount(wf);
+                string where = ComfyVideo.HasPromptMarker(wf) ? "「" + ComfyVideo.PromptMarker + "」の目印" : "プロンプトを入れる場所";
                 Result(Brushes.ForestGreen, "ワークフローを確認しました (" + (ComfyVideo.IsVideoWorkflow(wf) ? "動画用" : "画像用") +
-                                            "、ノード " + wf.Count + " 個、Load Image " + n + " 個" +
+                                            "、ノード " + wf.Count + " 個、Load Image " + n + " 個、" +
+                                            (slots > 0 ? where + " " + slots + " か所" : "プロンプトなし") +
                                             (n > 1 ? " ※すべて同じ画像に差し替わります" : "") + ")");
                 return true;
             }
@@ -4859,6 +4864,8 @@ namespace JRate
                 var wf = ComfyVideo.LoadWorkflow(ComfyVideo.NewSerializer(), workflowPath[sel]);
                 if (ComfyVideo.FindNodes(wf, "LoadImage").Count == 0)
                     throw new Exception("ワークフローに「Load Image」(LoadImage) ノードがありません。\n" + workflowPath[sel]);
+                string problem = ComfyVideo.PromptSlotProblem(wf);
+                if (problem != null) throw new Exception(problem);
                 hasPrompt = ComfyVideo.HasPrompt(wf);
                 video = ComfyVideo.IsVideoWorkflow(wf);
                 workflowSeconds = ComfyVideo.GetDuration(wf);

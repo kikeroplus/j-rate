@@ -703,8 +703,7 @@ namespace JRate
 
             foreach (var node in loadNodes) Inputs(node)["image"] = uploadName;
             RandomizeSeeds(workflow);
-            if (prompt != null)
-                foreach (var slot in PromptSlots(workflow)) slot.Key[slot.Value] = prompt;
+            SetPrompt(workflow, prompt);
             if (seconds != null) SetDuration(workflow, seconds.Value);
 
             // 実行を依頼
@@ -901,29 +900,87 @@ namespace JRate
             return false;
         }
 
-        // ワークフローにプロンプトを入れる場所があるか
+        public const string PromptMarker = "{prompt}";   // ワークフローの文字列にこれがあれば、そこをプロンプトに置き換える
+        private static readonly string[] PromptTitles = { "positive", "user prompt" };   // 文字列ノードのタイトルにこれがあればプロンプトを入れる
+
+        // ワークフローにプロンプトを入れる場所 (実際に使われるもの) があるか
         public static bool HasPrompt(Dictionary<string, object> wf)
         {
             return PromptSlots(wf).Count > 0;
         }
 
-        // プロンプトを入れる場所 (inputs とキー名)。
-        //   文字列が直接入っている "prompt" 入力があればそこ (すべて)。
-        //   なければ CLIPTextEncode の "text" : 1 つならそれ、複数ならタイトルに Positive とあるもの。
+        public static int PromptSlotCount(Dictionary<string, object> wf)
+        {
+            return PromptSlots(wf).Count;
+        }
+
+        public static bool HasPromptMarker(Dictionary<string, object> wf)
+        {
+            return MarkerSlots(wf).Count > 0;
+        }
+
+        // プロンプトを入れる場所はあるのに、どれも実際には使われないとき、その理由 (問題なければ null)。
+        // 入れる場所がまったくないワークフロー (アップスケールなど) は、プロンプトなしで使えるので null
+        public static string PromptSlotProblem(Dictionary<string, object> wf)
+        {
+            if (PromptSlots(wf).Count > 0) return null;
+            if (MarkerSlots(wf).Count > 0)
+                return "このワークフローの「" + PromptMarker + "」の目印は、どれも実際には使われない場所にあります " +
+                       "(If/Else Switch の使われない側など)。\n" +
+                       "ComfyUI で、画像に使われる文字欄に「" + PromptMarker + "」を書いてから、もう一度「Export (API)」で保存してください。";
+            if (PromptSlotCandidates(wf).Count > 0)
+                return "このワークフローでプロンプトを入れる場所は、実際には使われていません " +
+                       "(If/Else Switch の使われない側につながっているなど)。\n" +
+                       "ComfyUI で、画像に使われる文字欄に「" + PromptMarker + "」と書いてから、もう一度「Export (API)」で保存してください。\n" +
+                       "「" + PromptMarker + "」があれば、そこをプロンプトに置き換えます (前後に書いた語はそのまま残ります)。";
+            return null;
+        }
+
+        // プロンプトを入れる。目印は prompt が null (ワークフローのまま) でも消す
+        private static void SetPrompt(Dictionary<string, object> wf, string prompt)
+        {
+            bool marked = MarkerSlots(wf).Count > 0;
+            if (prompt == null && !marked) return;
+            foreach (var slot in PromptSlots(wf))
+                slot.Key[slot.Value] = marked ? ((string)slot.Key[slot.Value]).Replace(PromptMarker, prompt ?? "")
+                                              : prompt;
+        }
+
+        // プロンプトを入れる場所のうち、実際に使われるもの (Switch で使われない側などは除く)
         private static List<KeyValuePair<Dictionary<string, object>, string>> PromptSlots(Dictionary<string, object> wf)
         {
-            var slots = new List<KeyValuePair<Dictionary<string, object>, string>>();
+            var used = UsedNodeIds(wf);
+            return PromptSlotCandidates(wf).Where(s => IsUsedSlot(wf, used, s.Key, s.Value)).ToList();
+        }
+
+        // プロンプトを入れる場所の候補 (inputs とキー名)。
+        //   {prompt} の目印があればそこ (すべて。目印の部分だけを置き換える)。
+        //   目印がなければ、次のどちらかがあればそこ (すべて):
+        //     - 文字列が直接入っている "prompt" 入力
+        //     - 文字列ノード (PrimitiveStringMultiline など) で、タイトルに Positive / User Prompt とあるもの
+        //       (ComfyUI のテンプレートは、ここから TextGenerate や CLIP Text Encode へ線でつないでいる)
+        //   なければ CLIPTextEncode の "text" : 1 つならそれ、複数ならタイトルに Positive とあるもの。
+        //   タイトルに Negative とあるノードには入れない。
+        private static List<KeyValuePair<Dictionary<string, object>, string>> PromptSlotCandidates(Dictionary<string, object> wf)
+        {
+            var slots = MarkerSlots(wf);
+            if (slots.Count > 0) return slots;
+
             var clip = new List<Dictionary<string, object>>();
             foreach (var v in wf.Values)
             {
                 var node = v as Dictionary<string, object>;
                 if (node == null) continue;
                 var inputs = Inputs(node);
-                if (inputs == null) continue;
+                if (inputs == null || IsNegative(node)) continue;
                 object val;
+                string ct = ClassType(node);
                 if (inputs.TryGetValue("prompt", out val) && val is string)
                     slots.Add(new KeyValuePair<Dictionary<string, object>, string>(inputs, "prompt"));
-                else if (ClassType(node) == "CLIPTextEncode" && inputs.TryGetValue("text", out val) && val is string)
+                else if (ct.StartsWith("PrimitiveString") && inputs.TryGetValue("value", out val) && val is string &&
+                         PromptTitles.Any(t => Title(node).IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0))
+                    slots.Add(new KeyValuePair<Dictionary<string, object>, string>(inputs, "value"));
+                else if (ct == "CLIPTextEncode" && inputs.TryGetValue("text", out val) && val is string)
                     clip.Add(node);
             }
             if (slots.Count > 0) return slots;
@@ -934,6 +991,99 @@ namespace JRate
             foreach (var n in pick)
                 slots.Add(new KeyValuePair<Dictionary<string, object>, string>(Inputs(n), "text"));
             return slots;
+        }
+
+        // 文字列に {prompt} の目印が入っている入力 (ノードの種類・タイトルは問わない)
+        private static List<KeyValuePair<Dictionary<string, object>, string>> MarkerSlots(Dictionary<string, object> wf)
+        {
+            var slots = new List<KeyValuePair<Dictionary<string, object>, string>>();
+            foreach (var v in wf.Values)
+            {
+                var node = v as Dictionary<string, object>;
+                var inputs = node == null ? null : Inputs(node);
+                if (inputs == null) continue;
+                foreach (var kv in inputs)
+                {
+                    var s = kv.Value as string;
+                    if (s != null && s.Contains(PromptMarker))
+                        slots.Add(new KeyValuePair<Dictionary<string, object>, string>(inputs, kv.Key));
+                }
+            }
+            return slots;
+        }
+
+        private static bool IsNegative(Dictionary<string, object> node)
+        {
+            return Title(node).IndexOf("negative", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        // 他ノードからの接続 [id, n]
+        private static bool IsLink(object value)
+        {
+            var list = value as object[];
+            return list != null && list.Length == 2 && list[0] is string;
+        }
+
+        private static string LinkId(object value)
+        {
+            return (string)((object[])value)[0];
+        }
+
+        // If/Else Switch (on_true / on_false) で、今の switch の値では使われない側の入力名。
+        // switch が線でつながっているなど決まらないときは null (どちらも使われるとみなす)
+        private static string SwitchUnusedKey(Dictionary<string, object> inputs)
+        {
+            object sw;
+            if (inputs.ContainsKey("on_true") && inputs.ContainsKey("on_false") &&
+                inputs.TryGetValue("switch", out sw) && sw is bool)
+                return (bool)sw ? "on_false" : "on_true";
+            return null;
+        }
+
+        // 実際に実行されるノード。どこからも使われていないノード (保存など) から線を逆にたどる。
+        // Switch は使われない側の線をたどらない
+        private static HashSet<string> UsedNodeIds(Dictionary<string, object> wf)
+        {
+            var referenced = new HashSet<string>();
+            foreach (var v in wf.Values)
+            {
+                var node = v as Dictionary<string, object>;
+                var inputs = node == null ? null : Inputs(node);
+                if (inputs == null) continue;
+                foreach (var val in inputs.Values)
+                    if (IsLink(val)) referenced.Add(LinkId(val));
+            }
+            var stack = new Stack<string>();
+            foreach (var kv in wf)
+            {
+                var node = kv.Value as Dictionary<string, object>;
+                if (node != null && Inputs(node) != null && !referenced.Contains(kv.Key)) stack.Push(kv.Key);
+            }
+            var used = new HashSet<string>();
+            while (stack.Count > 0)
+            {
+                string id = stack.Pop();
+                object o;
+                if (used.Contains(id) || !wf.TryGetValue(id, out o)) continue;
+                var node = o as Dictionary<string, object>;
+                if (node == null) continue;
+                used.Add(id);
+                var inputs = Inputs(node);
+                if (inputs == null) continue;
+                string unused = SwitchUnusedKey(inputs);
+                foreach (var kv in inputs)
+                    if (kv.Key != unused && IsLink(kv.Value)) stack.Push(LinkId(kv.Value));
+            }
+            return used;
+        }
+
+        private static bool IsUsedSlot(Dictionary<string, object> wf, HashSet<string> used,
+                                       Dictionary<string, object> inputs, string key)
+        {
+            foreach (var id in used)
+                if (Inputs((Dictionary<string, object>)wf[id]) == inputs)
+                    return key != SwitchUnusedKey(inputs);
+            return false;
         }
 
         // ワークフローに書かれている動画の長さ (秒)。変えられる場所がなければ null
