@@ -99,19 +99,44 @@ namespace JRate
     public class GenRequest
     {
         public string ConnectionName = "", Url = "", WorkflowName = "", WorkflowPath = "";
-        public string Prompt;      // null = ワークフローに書かれているまま
+        public string Prompt;      // 入力したプロンプト (説明と組み立てる前)。null = ワークフローに書かれているまま
         public double? Seconds;    // 同上
         public string BasePrompt = "";   // 生成を始めたときのベースプロンプト (Prompt のあとに続けて送る)
+        // 読み取り: 登録した時点の読み取りプリセットの写し (name・system・template・temperature・url・model・max_side)。
+        // 記録や画面の欄から作ったものは name (と index) だけ。null = 読み取りなし
+        public Dictionary<string, object> Reader;
+        public string Caption;           // 説明プロンプト (読み取ったもの / .txt の写し)。null = まだ読み取っていない
+        // エンハンサー: 同じく登録した時点の写し。null = 盛らない
+        public Dictionary<string, object> Enhancer;
+        public string EnhancedPrompt;    // 盛ったあとの本文 (ジョブの番が来たときに決まる)
 
-        // ComfyUI に送るプロンプト : プロンプト、改行、ベースプロンプトの順。Prompt が null なら null
+        public string ReaderName { get { return Reader == null ? "" : ComfySettings.Str(Reader, "name"); } }
+        public string EnhancerName { get { return Enhancer == null ? "" : ComfySettings.Str(Enhancer, "name"); } }
+
+        // 入力したプロンプトに説明を足したもの (盛る前)。Prompt が null なら null
+        public string ComposedPrompt
+        {
+            get { return Prompt == null ? null : JRate.Reader.Compose(Prompt, Reader != null ? Caption ?? "" : null); }
+        }
+
+        // ComfyUI に送るプロンプト : (盛ったときは盛った本文、なければ組み立てたもの)、改行、ベースプロンプトの順。
+        // Prompt が null なら null
         public string FullPrompt
         {
             get
             {
                 if (Prompt == null) return null;
-                string p = Prompt.Trim(), b = (BasePrompt ?? "").Trim();
+                string p = (EnhancedPrompt ?? ComposedPrompt).Trim(), b = (BasePrompt ?? "").Trim();
                 return p.Length == 0 ? b : b.Length == 0 ? p : p + "\n" + b;
             }
+        }
+
+        public GenRequest Clone()
+        {
+            var r = (GenRequest)MemberwiseClone();
+            if (Reader != null) r.Reader = new Dictionary<string, object>(Reader);
+            if (Enhancer != null) r.Enhancer = new Dictionary<string, object>(Enhancer);
+            return r;
         }
     }
 
@@ -198,6 +223,17 @@ namespace JRate
                 d["prompt"] = req.Prompt;
                 d["basePrompt"] = req.BasePrompt;
                 d["seconds"] = req.Seconds;
+                if (req.Reader != null)
+                {
+                    d["reader"] = req.ReaderName;
+                    d["caption"] = req.Caption;   // 送った時点の説明の写し
+                }
+                if (req.Enhancer != null)
+                {
+                    // prompt は入力したまま。実際に送った文は enhancedPrompt
+                    d["enhancer"] = req.EnhancerName;
+                    d["enhancedPrompt"] = req.EnhancedPrompt;
+                }
                 string line = ComfyVideo.NewSerializer().Serialize(d) + "\r\n";
                 string file = ComfySettings.FilePath("comfy_history.txt");
                 lock (Gate)
@@ -257,6 +293,16 @@ namespace JRate
             if (d.TryGetValue("prompt", out o) && o != null) r.Request.Prompt = o.ToString();
             r.Request.BasePrompt = ComfySettings.Str(d, "basePrompt");
             if (d.TryGetValue("seconds", out o) && o != null) r.Request.Seconds = Convert.ToDouble(o);
+            if (d.ContainsKey("reader"))
+            {
+                r.Request.Reader = new Dictionary<string, object> { { "name", ComfySettings.Str(d, "reader") } };
+                if (d.TryGetValue("caption", out o) && o != null) r.Request.Caption = o.ToString();
+            }
+            if (d.ContainsKey("enhancer"))
+            {
+                r.Request.Enhancer = new Dictionary<string, object> { { "name", ComfySettings.Str(d, "enhancer") } };
+                if (d.TryGetValue("enhancedPrompt", out o) && o != null) r.Request.EnhancedPrompt = o.ToString();
+            }
             return r;
         }
     }

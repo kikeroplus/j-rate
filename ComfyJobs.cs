@@ -29,6 +29,9 @@ namespace JRate
         public readonly CancellationTokenSource Cancel = new CancellationTokenSource();
         public List<string> Outputs;          // 保存したファイル (完了後)
         public string PromptId = "";          // ComfyUI が受け付けた番号 (続きから始めるときに使う)
+        public bool NeedRead;                 // ComfyUI に送る前に読み取る (読み取ったら false)
+        public int Group;                     // 1 回の「生成する」で登録した組。同じ組・同じ元画像は読み取りを 1 回で済ませる
+        public bool Reading;                  // 読み取っている最中 (同じ元画像のほかのジョブを待たせる)
         public bool Held;                     // 一時停止中に待機へ戻したもの (再開するまで実行に移さない)
         public DateTime Started;              // 実行に移った時刻
 
@@ -54,6 +57,11 @@ namespace JRate
         }
 
         public bool IsRunning { get { return state == GenState.Running; } }
+
+        public bool SameImage(GenJob other)
+        {
+            return Group == other.Group && string.Equals(Source, other.Source, StringComparison.OrdinalIgnoreCase);
+        }
 
         // 一時停止中かどうか (ジョブ一覧の表示用。待機中のものだけ「一時停止」と出す)
         public bool Paused
@@ -322,19 +330,22 @@ namespace JRate
             AddRow(grid, "長さ", req.Seconds != null
                                  ? req.Seconds.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) + " 秒"
                                  : "(ワークフローのまま)");
+            if (req.Reader != null) AddRow(grid, "読み取りプリセット", req.ReaderName.Length > 0 ? req.ReaderName : "(名前なし)");
+            if (req.Enhancer != null) AddRow(grid, "エンハンサー", req.EnhancerName.Length > 0 ? req.EnhancerName : "(名前なし)");
             panel.Children.Add(grid);
 
-            panel.Children.Add(new TextBlock { Text = req.Prompt != null ? "プロンプト" : "プロンプト (ワークフローのまま)" });
-            panel.Children.Add(new TextBox
+            panel.Children.Add(new TextBlock { Text = req.Prompt != null ? "プロンプト (入力したもの)" : "プロンプト (ワークフローのまま)" });
+            panel.Children.Add(ReadOnlyBox(req.Prompt ?? "", req.Reader != null || req.EnhancedPrompt != null ? 80 : 120));
+            if (req.Reader != null)
             {
-                Text = req.Prompt ?? "",
-                IsReadOnly = true,
-                TextWrapping = TextWrapping.Wrap,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                Height = 120,
-                Padding = new Thickness(2, 3, 2, 3),
-                Margin = new Thickness(0, 4, 0, 16)
-            });
+                panel.Children.Add(new TextBlock { Text = "説明プロンプト (送った時点のもの。やり直すときは今の .txt を使います)" });
+                panel.Children.Add(ReadOnlyBox(req.Caption ?? "", 80));
+            }
+            if (req.EnhancedPrompt != null)
+            {
+                panel.Children.Add(new TextBlock { Text = "AI で盛ったプロンプト (実際に送った文。このあとにベースプロンプトを付けて送りました)" });
+                panel.Children.Add(ReadOnlyBox(req.EnhancedPrompt, 100));
+            }
 
             if (req.BasePrompt.Length > 0)
             {
@@ -357,7 +368,7 @@ namespace JRate
                 Content = "この設定で生成する...",
                 Padding = new Thickness(12, 2, 12, 2),
                 IsEnabled = hasSource,
-                ToolTip = "元の画像から、同じ設定でもう一度生成します (seed は変わります)"
+                ToolTip = "元の画像から、同じ設定でもう一度生成します (seed は変わります。エンハンサーを使ったときは盛り直します)"
             };
             ToolTipService.SetShowOnDisabled(again, true);
             var close = new Button { Content = "閉じる", Width = 90, IsCancel = true, IsDefault = true, Margin = new Thickness(8, 0, 0, 0) };
@@ -384,6 +395,20 @@ namespace JRate
             {
                 Regenerate = true;
                 DialogResult = true;
+            };
+        }
+
+        private static TextBox ReadOnlyBox(string text, double height)
+        {
+            return new TextBox
+            {
+                Text = text,
+                IsReadOnly = true,
+                TextWrapping = TextWrapping.Wrap,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Height = height,
+                Padding = new Thickness(2, 3, 2, 3),
+                Margin = new Thickness(0, 4, 0, 16)
             };
         }
 

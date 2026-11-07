@@ -1390,6 +1390,13 @@ namespace JRate
             var makeAll = new MenuItem { Header = "表示中の画像をまとめて生成する..." };
             makeAll.Click += delegate { Generate(ShownImages(), null, "表示中の画像"); };
             menu.Items.Add(makeAll);
+            var caption = new MenuItem { Header = "説明プロンプト..." };
+            caption.Click += delegate
+            {
+                var it = Current;
+                if (it != null && !it.IsVideo) ShowCaption(it.Path);
+            };
+            menu.Items.Add(caption);
             var genInfo = new MenuItem { Header = "生成時の設定..." };
             genInfo.Click += delegate
             {
@@ -1403,6 +1410,12 @@ namespace JRate
             var comfySettings = new MenuItem { Header = "生成の設定..." };
             comfySettings.Click += delegate { ShowComfySettings(); };
             menu.Items.Add(comfySettings);
+            var readerSettings = new MenuItem { Header = "読み取りの設定..." };
+            readerSettings.Click += delegate { ShowLlmSettings(true); };
+            menu.Items.Add(readerSettings);
+            var enhancerSettings = new MenuItem { Header = "エンハンサーの設定..." };
+            enhancerSettings.Click += delegate { ShowLlmSettings(false); };
+            menu.Items.Add(enhancerSettings);
             menu.Items.Add(new Separator());
 
             var ratingItems = new MenuItem[6];
@@ -1444,6 +1457,7 @@ namespace JRate
                 makeAll.Header = "表示中の画像をまとめて生成する (" + shown + " 枚)...";
                 makeAll.IsEnabled = shown > 0;
                 genInfo.IsEnabled = it != null && ComfyHistory.Find(it.Path) != null;
+                caption.IsEnabled = it != null && !it.IsVideo;
             };
 
             // 画像がないとき・処理中はメニューを出さない
@@ -1502,16 +1516,16 @@ namespace JRate
             // 接続先・ワークフロー・プロンプト・秒数・回数を聞く
             GenRequest request;
             int repeat;
+            ComfyPromptDialog dlg;
             try
             {
                 string title = sources.Count == 1
                     ? "生成する - " + System.IO.Path.GetFileName(sources[0])
                     : "まとめて生成する - " + what + " " + sources.Count + " 枚";
                 Window owner = gridWindow != null && gridWindow.IsActive ? (Window)gridWindow : this;
-                ComfyPromptDialog dlg;
                 for (;;)
                 {
-                    dlg = new ComfyPromptDialog(title, sources.Count, prefill);
+                    dlg = new ComfyPromptDialog(title, sources, prefill);
                     dlg.Owner = owner;
                     if (dlg.ShowDialog() == true) break;
                     if (dlg.Reopen == null) return;
@@ -1527,6 +1541,9 @@ namespace JRate
                 }
                 request = dlg.Request;
                 repeat = dlg.Repeat;
+                // 読み取りとエンハンサーは、登録した時点の写しで行う (あとで設定を変えても、頼んだときの内容で)
+                request.Reader = dlg.ReaderPreset != null ? Reader.Snapshot(dlg.ReaderPreset) : null;
+                request.Enhancer = dlg.EnhancerPreset != null ? Enhancer.Snapshot(dlg.EnhancerPreset) : null;
             }
             catch (Exception ex)
             {
@@ -1541,11 +1558,26 @@ namespace JRate
                 return;
 
             bool batch = total > 1;
+            int group = ++jobGroups;
+            int toRead = 0;
             foreach (string src in sources)
-                for (int i = 0; i < repeat; i++) jobs.Add(new GenJob(src, request, batch));
+            {
+                // 説明プロンプトは今の .txt。なければ (または読み直すときは) ジョブの中で読み取る
+                string caption = request.Reader != null ? Reader.ReadCaption(src) : null;
+                bool needRead = request.Reader != null && (dlg.Reread || string.IsNullOrWhiteSpace(caption));
+                if (needRead) toRead++;
+                for (int i = 0; i < repeat; i++)
+                {
+                    var req = request.Clone();   // 盛った本文などをジョブごとに持たせる
+                    req.Caption = needRead || request.Reader == null ? null : caption;
+                    jobs.Add(new GenJob(src, req, batch) { NeedRead = needRead, Group = group });
+                }
+            }
             if (batch || paused) ShowJobs();
             StartJobs();
-            if (paused) statusText.Text = "一時停止中です。ジョブ一覧の「再開」で生成を始めます。" + JobCounts();
+            string note = toRead > 0 ? toRead + " 枚は、ジョブの中で読み取ってから生成します。" : "";
+            if (paused) note += "一時停止中です。ジョブ一覧の「再開」で生成を始めます。";
+            if (note.Length > 0) statusText.Text = note + JobCounts();
         }
 
         // 待機中のジョブを、接続先ごとに MaxRunningJobs 件まで実行に移す。
@@ -1555,6 +1587,7 @@ namespace JRate
             foreach (var job in jobs.Where(j => j.State == GenState.Waiting).ToList())
             {
                 if (paused && (job.PromptId.Length == 0 || job.Held)) continue;
+                if (job.NeedRead && jobs.Any(j => j.Reading && j.SameImage(job))) continue;   // その結果を待つ
                 string url = job.Request.Url;
                 if (jobs.Count(j => j.State == GenState.Running && j.Request.Url == url) >= MaxRunningJobs) continue;
                 RunJob(job);
@@ -1577,6 +1610,7 @@ namespace JRate
             job.State = GenState.Running;
             job.Held = false;
             job.Started = DateTime.Now;
+            job.Reading = job.NeedRead && job.PromptId.Length == 0;
             job.Status = "準備中...";
             ShowJobStatus(job);
 
@@ -1605,6 +1639,11 @@ namespace JRate
             {
                 result = await Task.Run(() =>
                 {
+                    if (startId.Length == 0)
+                    {
+                        RunLlmStages(job, report, token);   // 読み取り・盛る (済んだ段はやり直さない)
+                        request = job.Request;
+                    }
                     var files = ComfyVideo.Generate(job.Source, request.Url, request.WorkflowPath,
                                                     request.FullPrompt, request.Seconds, report, token,
                                                     startId, submitted, runTime, () => paused);
@@ -1614,6 +1653,7 @@ namespace JRate
             }
             catch (Exception ex) { error = ex; }
 
+            job.Reading = false;
             bool failed = false;
             var heldError = error as GenerationHeldException;
             if (heldError != null && !job.Cancel.IsCancellationRequested)
@@ -1622,7 +1662,7 @@ namespace JRate
                 job.State = GenState.Waiting;
                 job.Held = true;
                 if (!heldError.Sent) job.PromptId = "";
-                job.Status = "一時停止のため待機に戻しました";
+                job.Status = heldError.Message;
                 statusText.Text = job.FileName + " を待機に戻しました";
             }
             else if (error is OperationCanceledException || (error != null && job.Cancel.IsCancellationRequested))
@@ -1635,7 +1675,7 @@ namespace JRate
             {
                 failed = true;
                 job.State = GenState.Failed;
-                job.Status = error is System.Net.WebException
+                job.Status = error is LlmException ? error.Message : error is System.Net.WebException
                     ? "ComfyUI に接続できません (" + request.Url + ")。" + error.Message
                     : error.Message;
                 statusText.Text = "生成できませんでした: " + job.FileName;
@@ -1678,6 +1718,58 @@ namespace JRate
                     ? "ComfyUI に接続できません (" + request.Url + ")。\nComfyUI が起動しているか確認してください。\n\n" + error.Message
                     : error.Message;
                 MessageBox.Show(this, job.FileName + "\n\n" + text, "生成する - J-Rate", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
+        private int jobGroups;   // 1 回の「生成する」で登録したジョブの組の番号
+
+        // ComfyUI に送る前に、読み取り (説明プロンプトがまだないとき・読み直すとき) と AI で盛る (エンハンサーを
+        // 選んだとき) を行う (裏のスレッドで呼ぶ)。どちらも失敗したらジョブの失敗にする (そのまま送らない)。
+        // 一時停止中に済んだら、その結果を持ったまま待機に戻す
+        private void RunLlmStages(GenJob job, Action<string> report, CancellationToken token)
+        {
+            var dispatcher = Dispatcher;
+            if (job.NeedRead)
+            {
+                if (job.Request.Reader == null || !job.Request.Reader.ContainsKey("system"))
+                    throw new LlmException("読み取りプリセットが選ばれていないので、読み取れません。");
+                report("読み取っています...");
+                string caption;
+                try { caption = Llm.Wait(() => Reader.ReadWith(job.Request.Reader, job.Source), token); }
+                catch (LlmException ex) { throw new LlmException("読み取れませんでした。" + ex.Message); }
+                try { Reader.WriteCaption(job.Source, caption); }
+                catch (Exception ex) { throw new LlmException("説明プロンプトを書けませんでした。" + ex.Message); }
+                dispatcher.Invoke(new Action(() =>
+                {
+                    // 同じ元画像を待っているジョブにも渡す
+                    foreach (var j in jobs.Where(x => x.State == GenState.Waiting && x.NeedRead && x.SameImage(job)).Concat(new[] { job }))
+                    {
+                        j.Request.Caption = caption;
+                        j.NeedRead = false;
+                    }
+                    job.Reading = false;
+                    SaveJobs();
+                    StartJobs();
+                }));
+                if (paused) throw new GenerationHeldException(false);   // 読み取った説明を持ったまま待機に戻る
+            }
+            var req = job.Request;
+            string composed = req.ComposedPrompt;
+            if (req.Enhancer != null && req.EnhancedPrompt == null && !string.IsNullOrWhiteSpace(composed))
+            {
+                if (!req.Enhancer.ContainsKey("system"))
+                    throw new LlmException("エンハンサーが選ばれていないので、盛れません。");
+                report("AI で盛っています...");
+                string text;
+                try { text = Llm.Wait(() => Enhancer.EnhanceWith(req.Enhancer, composed), token).Trim(); }
+                catch (LlmException ex) { throw new LlmException("AI で盛れませんでした。" + ex.Message); }
+                if (text.Length == 0) throw new LlmException("AI で盛った結果が空でした。");
+                dispatcher.Invoke(new Action(() =>
+                {
+                    req.EnhancedPrompt = text;   // ジョブごとに盛るので、回数を増やすと毎回違う盛り方になる
+                    SaveJobs();
+                }));
+                if (paused) throw new GenerationHeldException(false);
             }
         }
 
@@ -1789,10 +1881,16 @@ namespace JRate
                 req["prompt"] = r.Prompt;
                 req["seconds"] = r.Seconds;
                 req["basePrompt"] = r.BasePrompt;
+                req["reader"] = r.Reader;
+                req["caption"] = r.Caption;
+                req["enhancer"] = r.Enhancer;
+                req["enhancedPrompt"] = r.EnhancedPrompt;
                 var d = new Dictionary<string, object>();
                 d["source"] = job.Source;
                 d["batch"] = job.Batch;
                 d["promptId"] = job.PromptId;
+                d["needRead"] = job.NeedRead;
+                d["group"] = job.Group;
                 d["request"] = req;
                 list.Add(d);
             }
@@ -1838,9 +1936,16 @@ namespace JRate
                 };
                 if (rq.TryGetValue("prompt", out o) && o != null) r.Prompt = o.ToString();
                 if (rq.TryGetValue("seconds", out o) && o != null) r.Seconds = Convert.ToDouble(o);
+                r.Reader = rq.TryGetValue("reader", out o) ? o as Dictionary<string, object> : null;
+                if (rq.TryGetValue("caption", out o) && o != null) r.Caption = o.ToString();
+                r.Enhancer = rq.TryGetValue("enhancer", out o) ? o as Dictionary<string, object> : null;
+                if (rq.TryGetValue("enhancedPrompt", out o) && o != null) r.EnhancedPrompt = o.ToString();
                 bool batch = d.TryGetValue("batch", out o) && o is bool && (bool)o;
                 var job = new GenJob(source, r, batch);
                 job.PromptId = ComfySettings.Str(d, "promptId");
+                job.NeedRead = r.Reader != null && (d.TryGetValue("needRead", out o) && o is bool && (bool)o || r.Caption == null);
+                int g;
+                job.Group = int.TryParse(ComfySettings.Str(d, "group"), out g) ? -Math.Abs(g) : 0;   // 今回の番号とぶつからないよう負に
                 result.Add(job);
             }
             return result;
@@ -2036,6 +2141,22 @@ namespace JRate
         }
 
         // 右クリックした (生成で出来た) ファイルの、生成時の設定を見せる
+        // 説明プロンプト (.txt) を見る・直す・読み取る小窓
+        private void ShowCaption(string image)
+        {
+            var w = new CaptionWindow(image, msg => statusText.Text = msg);
+            w.Owner = gridWindow != null && gridWindow.IsActive ? (Window)gridWindow : this;
+            w.Show();
+        }
+
+        private void ShowLlmSettings(bool reader)
+        {
+            string file = reader ? Reader.GenerateFile : Enhancer.GenerateFile;
+            var dlg = new LlmSettingsDialog(reader, Math.Max(LlmPresets.LoadIndex(file), 0));
+            dlg.Owner = gridWindow != null && gridWindow.IsActive ? (Window)gridWindow : this;
+            dlg.ShowDialog();
+        }
+
         private void ShowGenInfo(ImageItem item)
         {
             var record = ComfyHistory.Find(item.Path);
@@ -2734,7 +2855,7 @@ namespace JRate
             if (item.IsVideo) StopVideo();   // 再生中のファイルを手放す
 
             bool aborted;
-            int rc = RecycleBin.Send(new WindowInteropHelper(this).Handle, item.Path, out aborted);
+            int rc = RecycleBin.Send(new WindowInteropHelper(this).Handle, WithCaptions(new[] { item }), out aborted);
             if (aborted || File.Exists(item.Path))
             {
                 if (item.IsVideo) ShowCurrent();
@@ -2752,6 +2873,15 @@ namespace JRate
             statusText.Text = item.FileName + " をごみ箱に移動しました";
         }
 
+        // ごみ箱へ送るもの: ファイルと、画像の説明プロンプトの .txt (同じ名前の別の画像が残るものは除く。
+        // ui-standard 8 章「説明プロンプトの .txt」)。件数の確認や結果は画像だけで数える
+        private static string WithCaptions(IEnumerable<ImageItem> targets)
+        {
+            HashSet<string> stays;
+            var txts = Reader.Companions(targets.Where(t => !t.IsVideo).Select(t => t.Path), out stays);
+            return string.Join("\0", targets.Select(t => t.Path).Concat(txts.Where(t => !stays.Contains(t))));
+        }
+
         // 選択している複数のファイルをまとめてごみ箱へ送る (1 つのときと違い、確認してから)
         private void DeleteSelected()
         {
@@ -2765,8 +2895,7 @@ namespace JRate
             StopVideo();   // 再生中のファイルを手放す
 
             bool aborted;
-            int rc = RecycleBin.Send(new WindowInteropHelper(this).Handle,
-                                     string.Join("\0", targets.Select(t => t.Path)), out aborted);
+            int rc = RecycleBin.Send(new WindowInteropHelper(this).Handle, WithCaptions(targets), out aborted);
             var gone = targets.Where(t => !File.Exists(t.Path)).ToList();
             foreach (var it in gone)
             {
@@ -3794,6 +3923,11 @@ namespace JRate
             var moved = new List<ImageItem>();
             int total = targets.Count;
             var progress = new Progress<int>(n => statusText.Text = verb + "中... " + n + " / " + total);
+            // 画像の説明プロンプトの .txt も一緒に動かす。同じ名前の別の画像が元のフォルダに残るものは、移動でもコピーにする
+            HashSet<string> captionStays;
+            var captionFiles = new HashSet<string>(Reader.Companions(targets.Where(t => !t.IsVideo).Select(t => t.Path), out captionStays),
+                                                   StringComparer.OrdinalIgnoreCase);
+            var captionsDone = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             await Task.Run(() =>
             {
@@ -3837,6 +3971,24 @@ namespace JRate
                         }
                         done++;
                         if (overwriteLog != null) overwriteLog.Add(item.FileName);
+
+                        // .txt は画像で決めたとおりに置く (画像を別名にしたら同じ別名、上書きしたら上書き)
+                        string txt = Reader.CaptionPath(item.Path);
+                        if (captionFiles.Contains(txt) && captionsDone.Add(txt))
+                        {
+                            try
+                            {
+                                string txtDst = Reader.CaptionPath(dst);
+                                if (move && !captionStays.Contains(txt))
+                                    RetryIO(() =>
+                                    {
+                                        if (File.Exists(txtDst)) File.Delete(txtDst);
+                                        File.Move(txt, txtDst);
+                                    });
+                                else File.Copy(txt, txtDst, true);
+                            }
+                            catch (Exception ex) { failed.Add(System.IO.Path.GetFileName(txt) + " : " + ex.Message); }
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -4635,6 +4787,20 @@ namespace JRate
         private readonly TextBox promptBox, secondsBox, repeatBox;
         private readonly TextBlock workflowError, promptLabel, secondsUnit, baseHint;
         private readonly CheckBox baseCheck;   // 外すとベースプロンプトを付けずに送る (前回の状態を覚える)
+        // 読み取り (なし / 読み取りプリセット) とエンハンサー (なし / 登録済み)。欄の行 → 番号 (なしは -1)
+        private readonly ComboBox readerBox, enhancerBox;
+        private readonly CheckBox rereadCheck;
+        private readonly TextBlock captionHint, llmNote;
+        private readonly StackPanel readerRow, enhancerRow;
+        private LlmPreset[] readers, enhancers;
+        private readonly List<int> readerIndex = new List<int>(), enhancerIndex = new List<int>();
+        private readonly List<string> sources;
+        private readonly List<string> captions = new List<string>();   // 元画像ごとの今の .txt (なければ null)
+
+        // 読み取りプリセット / エンハンサー (なしは null)、読み取り済みでも読み直すか
+        public LlmPreset ReaderPreset { get; private set; }
+        public LlmPreset EnhancerPreset { get; private set; }
+        public bool Reread { get; private set; }
         private string basePrompt = "";   // 選んでいるワークフローで使うベースプロンプト (動画用か画像用)
         private readonly DockPanel promptRow;
         private readonly Button okButton;
@@ -4650,8 +4816,11 @@ namespace JRate
         public GenRequest Reopen { get; private set; }
 
         // imageCount : 対象の画像の枚数 / prefill : 欄の初期値 (null なら前回の値)
-        public ComfyPromptDialog(string title, int imageCount, GenRequest prefill)
+        public ComfyPromptDialog(string title, List<string> sources, GenRequest prefill)
         {
+            this.sources = sources;
+            int imageCount = sources.Count;
+            foreach (string s in sources) captions.Add(Reader.ReadCaption(s));
             Title = title;
             Width = 600;
             SizeToContent = SizeToContent.Height;
@@ -4672,7 +4841,7 @@ namespace JRate
             });
             var saveSet = new Button { Content = "保存", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0), IsEnabled = false };
             var deleteSet = new Button { Content = "削除", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0), IsEnabled = false };
-            saveSet.ToolTip = "今の接続先・ワークフロー・プロンプト・長さを、選んでいる番号にまとめて保存します";
+            saveSet.ToolTip = "今の接続先・ワークフロー・プロンプト・長さ・読み取り・エンハンサーを、選んでいる番号にまとめて保存します";
             DockPanel.SetDock(saveSet, Dock.Right);
             DockPanel.SetDock(deleteSet, Dock.Right);
             setRow.Children.Add(deleteSet);
@@ -4815,6 +4984,56 @@ namespace JRate
                 Visibility = Visibility.Collapsed
             };
             panel.Children.Add(baseCheck);
+            promptBox.ToolTip = "プロンプトに " + Reader.CaptionMark + " と書くと、そこに説明プロンプトが入ります " +
+                                "(なければ説明プロンプトのあとに改行してこの欄の内容を続けます)";
+
+            // 読み取り: 元画像の説明プロンプト (.txt) を入力したプロンプトに足す。なければジョブの中で読み取る
+            readerRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 6) };
+            readerRow.Children.Add(new TextBlock { Text = "読み取り", Width = 80, VerticalAlignment = VerticalAlignment.Center });
+            readerBox = new ComboBox { Width = 300 };
+            readerRow.Children.Add(readerBox);
+            rereadCheck = new CheckBox
+            {
+                Content = "読み取り済みでも読み直す", IsChecked = Reader.Reread, VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(8, 0, 0, 0), ToolTip = "オンにすると、説明プロンプトのある画像も読み取り直して .txt を上書きします"
+            };
+            readerRow.Children.Add(rereadCheck);
+            var readerSettings = new Button { Content = "設定...", Padding = new Thickness(10, 1, 10, 1), Margin = new Thickness(8, 0, 0, 0), ToolTip = "読み取りの設定 (サーバーURL、モデル、読み取りプリセットの登録)" };
+            readerRow.Children.Add(readerSettings);
+            panel.Children.Add(readerRow);
+            captionHint = new TextBlock { TextTrimming = TextTrimming.CharacterEllipsis, Foreground = Brushes.DimGray, Margin = new Thickness(80, 0, 0, 8) };
+            panel.Children.Add(captionHint);
+
+            // エンハンサー: 組み立てたプロンプトを AI で盛ってから送る
+            enhancerRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 6) };
+            enhancerRow.Children.Add(new TextBlock { Text = "エンハンサー", Width = 80, VerticalAlignment = VerticalAlignment.Center });
+            enhancerBox = new ComboBox { Width = 300 };
+            enhancerRow.Children.Add(enhancerBox);
+            var enhancerSettings = new Button { Content = "設定...", Padding = new Thickness(10, 1, 10, 1), Margin = new Thickness(8, 0, 0, 0), ToolTip = "エンハンサーの設定 (指示文の登録、LLM のモデル)" };
+            enhancerRow.Children.Add(enhancerSettings);
+            panel.Children.Add(enhancerRow);
+            llmNote = new TextBlock { TextWrapping = TextWrapping.Wrap, Foreground = Brushes.DimGray, Margin = new Thickness(80, 0, 0, 12) };
+            panel.Children.Add(llmNote);
+            FillReaders(LlmPresets.LoadIndex(Reader.GenerateFile));
+            FillEnhancers(LlmPresets.LoadIndex(Enhancer.GenerateFile));
+            readerBox.SelectionChanged += delegate { UpdateLlmHints(); };
+            rereadCheck.Checked += delegate { UpdateLlmHints(); };
+            rereadCheck.Unchecked += delegate { UpdateLlmHints(); };
+            enhancerBox.SelectionChanged += delegate { llmNoteExtra = ""; UpdateLlmHints(); };
+            readerSettings.Click += delegate
+            {
+                int cur = CurrentReader();
+                var dlg = new LlmSettingsDialog(true, Math.Max(cur, 0)) { Owner = this };
+                dlg.ShowDialog();   // プリセットはその場で保存されるので、キャンセルでも読み直す
+                FillReaders(cur);
+            };
+            enhancerSettings.Click += delegate
+            {
+                int cur = CurrentEnhancer();
+                var dlg = new LlmSettingsDialog(false, Math.Max(cur, 0)) { Owner = this };
+                dlg.ShowDialog();
+                FillEnhancers(cur);
+            };
 
             var secRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 16) };
             secRow.Children.Add(new TextBlock { Text = "長さ", VerticalAlignment = VerticalAlignment.Center });
@@ -4971,6 +5190,15 @@ namespace JRate
                 deleteSet.IsEnabled = n >= 0 && !sets[n].IsEmpty;
                 if (n < 0 || sets[n].IsEmpty) return;
                 Apply(sets[n].Url, sets[n].Workflow, sets[n].Prompt.Length > 0 ? sets[n].Prompt : null, sets[n].Seconds);
+                // 読み取りとエンハンサーは名前で選ぶ (その項目のないセットでは、今のまま)
+                var notes = new List<string>();
+                if (sets[n].Reader != null && !SelectReaderByName(sets[n].Reader))
+                    notes.Add("セットの読み取りプリセット「" + sets[n].Reader + "」は登録にないので、「なし」にしました。");
+                if (sets[n].Reread != null) rereadCheck.IsChecked = sets[n].Reread.Value;
+                if (sets[n].Enhancer != null && !SelectEnhancerByName(sets[n].Enhancer))
+                    notes.Add("セットのエンハンサー「" + sets[n].Enhancer + "」は登録にないので、「なし」にしました。");
+                llmNoteExtra = string.Join("\n", notes);
+                UpdateLlmHints();
                 if (sets[n].Prompt.Length == 0) return;   // プロンプトを持たないセット : プリセットの表示もそのまま
 
                 // プロンプトのプリセットの表示を、セットを保存したときに選んでいた番号に合わせる。
@@ -4997,6 +5225,10 @@ namespace JRate
                 sets[n].Prompt = promptBox.IsEnabled ? promptBox.Text.Trim() : "";
                 sets[n].PromptPreset = promptBox.IsEnabled ? promptPresetBox.SelectedIndex : -1;
                 sets[n].Seconds = secondsBox.IsEnabled ? secondsBox.Text.Trim() : "";
+                int ri = CurrentReader(), ei = CurrentEnhancer();
+                sets[n].Reader = ri >= 0 ? readers[ri].Name : "";
+                sets[n].Reread = rereadCheck.IsChecked == true;
+                sets[n].Enhancer = ei >= 0 ? enhancers[ei].Name : "";
                 ComfySettings.Sets = sets;
                 relabelSet(n);
             };
@@ -5013,8 +5245,18 @@ namespace JRate
 
             // 「生成時の設定」から開いたときは、そのときの設定を入れておく
             if (prefill != null)
+            {
                 Apply(prefill.Url, prefill.WorkflowPath, prefill.Prompt,
                       prefill.Seconds != null ? prefill.Seconds.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "");
+                // 読み取りとエンハンサーは、番号が分かればそれ、なければ同じ名前のもの (登録になければ「なし」にして知らせる)
+                var notes = new List<string>();
+                if (!ApplyLlm(prefill.Reader, readerIndex, readers, readerBox) && prefill.ReaderName.Length > 0)
+                    notes.Add("記録の読み取りプリセット「" + prefill.ReaderName + "」は登録にないので、「なし」にしました。");
+                if (!ApplyLlm(prefill.Enhancer, enhancerIndex, enhancers, enhancerBox) && prefill.EnhancerName.Length > 0)
+                    notes.Add("記録のエンハンサー「" + prefill.EnhancerName + "」は登録にないので、「なし」にしました。");
+                llmNoteExtra = string.Join("\n", notes);
+                UpdateLlmHints();
+            }
 
             // Enter はプロンプトの改行。開始は「生成する」ボタンか Ctrl+Enter (どの欄にいても効く)
             PreviewKeyDown += delegate(object s, KeyEventArgs e)
@@ -5063,7 +5305,99 @@ namespace JRate
             if (promptBox.IsEnabled) r.Prompt = promptBox.Text;
             double sec;
             if (secondsBox.IsEnabled && TryParseSeconds(secondsBox.Text, out sec)) r.Seconds = sec;
+            int ri = CurrentReader(), ei = CurrentEnhancer();
+            if (ri >= 0) r.Reader = new Dictionary<string, object> { { "name", readers[ri].Name }, { "index", ri } };
+            if (ei >= 0) r.Enhancer = new Dictionary<string, object> { { "name", enhancers[ei].Name }, { "index", ei } };
             return r;
+        }
+
+        // ---------------- 読み取り・エンハンサーの欄 ----------------
+        private string llmNoteExtra = "";   // セットや記録のものが登録になかったときの知らせ
+
+        private void FillReaders(int index)
+        {
+            readers = Reader.Load();
+            FillLlm(readerBox, readerIndex, readers, "なし (入力したプロンプトだけを送る)", index);
+            UpdateLlmHints();
+        }
+
+        private void FillEnhancers(int index)
+        {
+            enhancers = Enhancer.Load();
+            FillLlm(enhancerBox, enhancerIndex, enhancers, "なし (そのまま送る)", index);
+            UpdateLlmHints();
+        }
+
+        private static void FillLlm(ComboBox box, List<int> index, LlmPreset[] list, string none, int selected)
+        {
+            box.Items.Clear();
+            index.Clear();
+            box.Items.Add(none);
+            index.Add(-1);
+            for (int i = 0; i < list.Length; i++)
+            {
+                if (list[i].IsEmpty) continue;
+                box.Items.Add(list[i].Label(i));
+                index.Add(i);
+            }
+            int pos = index.IndexOf(selected);
+            box.SelectedIndex = pos >= 0 ? pos : 0;
+        }
+
+        private int CurrentReader() { return readerBox.SelectedIndex > 0 ? readerIndex[readerBox.SelectedIndex] : -1; }
+        private int CurrentEnhancer() { return enhancerBox.SelectedIndex > 0 ? enhancerIndex[enhancerBox.SelectedIndex] : -1; }
+
+        private bool SelectReaderByName(string name) { return SelectByName(name, readerIndex, readers, readerBox); }
+        private bool SelectEnhancerByName(string name) { return SelectByName(name, enhancerIndex, enhancers, enhancerBox); }
+
+        // 名前で選ぶ (空なら「なし」)。登録になければ「なし」にして false
+        private static bool SelectByName(string name, List<int> index, LlmPreset[] list, ComboBox box)
+        {
+            int found = string.IsNullOrEmpty(name) ? -1 : Array.FindIndex(list, p => !p.IsEmpty && p.Name == name);
+            box.SelectedIndex = Math.Max(index.IndexOf(found), 0);
+            return string.IsNullOrEmpty(name) || found >= 0;
+        }
+
+        // 記録や入力中の内容のものを選ぶ (null なら「なし」)。番号が分かればそれ、なければ名前で探す
+        private static bool ApplyLlm(Dictionary<string, object> snap, List<int> index, LlmPreset[] list, ComboBox box)
+        {
+            if (snap == null) { box.SelectedIndex = 0; return true; }
+            object o;
+            if (snap.TryGetValue("index", out o) && o is int && index.Contains((int)o))
+            {
+                box.SelectedIndex = index.IndexOf((int)o);
+                return true;
+            }
+            return SelectByName(ComfySettings.Str(snap, "name"), index, list, box);
+        }
+
+        // 「＋ 説明プロンプト」の行と、読み取り・盛ることの説明
+        private void UpdateLlmHints()
+        {
+            if (captionHint == null || llmNote == null || readers == null || enhancers == null) return;
+            bool reads = CurrentReader() >= 0;
+            bool reread = rereadCheck.IsChecked == true;
+            rereadCheck.IsEnabled = reads;
+            if (!reads) captionHint.Text = "";
+            else if (sources.Count > 1)
+            {
+                int done = captions.Count(c => !string.IsNullOrWhiteSpace(c));
+                captionHint.Text = "＋ 説明プロンプト: 読み取り済み " + done + " 枚 / 未読み取り " + (sources.Count - done) + " 枚" +
+                                   (reread ? " (すべて読み直します)" : done < sources.Count ? " (未読み取りのものはジョブの中で読み取ります)" : "");
+            }
+            else if (reread || string.IsNullOrWhiteSpace(captions[0]))
+                captionHint.Text = "＋ 説明プロンプト: " + (reread ? "読み直します" : "まだ読み取っていません") + " (ジョブの中で読み取ります)";
+            else captionHint.Text = "＋ 説明プロンプト: " + string.Join(" ", captions[0].Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries));
+            captionHint.ToolTip = reads && sources.Count == 1 && captions[0] != null ? captions[0] : null;
+            captionHint.Visibility = reads ? Visibility.Visible : Visibility.Collapsed;
+
+            var notes = new List<string>();
+            if (llmNoteExtra.Length > 0) notes.Add(llmNoteExtra);
+            if (CurrentEnhancer() >= 0)
+                notes.Add("プロンプト" + (reads ? " (説明プロンプトを足したもの)" : "") + "を AI で盛ってから送ります (ベースプロンプトは盛りません)。" +
+                          "ジョブの番が来るたびに盛るので、回数を増やすと毎回違う盛り方になります。");
+            llmNote.Text = string.Join("\n", notes);
+            llmNote.Visibility = notes.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         }
 
         // クリップボードの生成パラメーターを各欄に入れる。接続先とワークフローは登録してあるものから選び直す
@@ -5144,6 +5478,16 @@ namespace JRate
             ComfySettings.ActiveWorkflow = workflowIndex[workflowBox.SelectedIndex];
             ComfySettings.LastSet = setBox.SelectedIndex;
             if (promptBox.IsEnabled) ComfySettings.LastPromptPreset = promptPresetBox.SelectedIndex;
+            if (promptBox.IsEnabled)
+            {
+                int ri = CurrentReader(), ei = CurrentEnhancer();
+                ReaderPreset = ri >= 0 ? readers[ri] : null;
+                EnhancerPreset = ei >= 0 ? enhancers[ei] : null;
+                Reread = ReaderPreset != null && rereadCheck.IsChecked == true;
+                LlmPresets.SaveIndex(Reader.GenerateFile, ri);
+                LlmPresets.SaveIndex(Enhancer.GenerateFile, ei);
+                Reader.Reread = rereadCheck.IsChecked == true;
+            }
             Request = request;
             Repeat = repeat;
             DialogResult = true;
@@ -5183,6 +5527,8 @@ namespace JRate
             promptLabel.Foreground = hasPrompt ? Brushes.Black : Brushes.DimGray;
             promptBox.IsEnabled = hasPrompt;
             promptRow.IsEnabled = hasPrompt;
+            if (readerRow != null) readerRow.IsEnabled = hasPrompt;
+            if (enhancerRow != null) enhancerRow.IsEnabled = hasPrompt;
 
             basePrompt = hasPrompt ? ComfySettings.BasePromptFor(video) : "";
             baseHint.Text = "＋ ベースプロンプト (" + (video ? "動画用" : "画像用") + ") : " +
