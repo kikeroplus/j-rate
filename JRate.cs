@@ -1171,18 +1171,19 @@ namespace JRate
                 if (src != null) src.CompositionTarget.RenderMode = RenderMode.SoftwareOnly;
             };
 
-            // 生成の途中で閉じると結果を受け取れないので確かめる
+            // 生成の途中で閉じようとしたら、残すか捨てるかを確かめる
             Closing += delegate(object s, CancelEventArgs e)
             {
-                int active = jobs.Count(j => j.IsActive);
-                if (active > 0 &&
-                    MessageBox.Show(this, "生成中のジョブが " + active + " 件あります。終了しますか？\n\n" +
-                                          "終了すると、出来たファイルを受け取れません (ComfyUI 側で実行中のものは止まりません)。",
-                                    "J-Rate", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
-                    e.Cancel = true;
+                if (!ConfirmCloseJobs()) e.Cancel = true;
             };
+            Closed += delegate { ReleaseJobsLock(); };
 
-            Loaded += delegate { OpenInitial(args); };
+            Loaded += delegate
+            {
+                OpenInitial(args);
+                // 前回終わらなかった生成ジョブは、ウィンドウが出てから聞く
+                Dispatcher.BeginInvoke(new Action(OfferResume), DispatcherPriority.ApplicationIdle);
+            };
             Closed += delegate { if (gridWindow != null) gridWindow.Close(); };
         }
 
@@ -1542,25 +1543,40 @@ namespace JRate
             bool batch = total > 1;
             foreach (string src in sources)
                 for (int i = 0; i < repeat; i++) jobs.Add(new GenJob(src, request, batch));
-            if (batch) ShowJobs();
+            if (batch || paused) ShowJobs();
             StartJobs();
+            if (paused) statusText.Text = "一時停止中です。ジョブ一覧の「再開」で生成を始めます。" + JobCounts();
         }
 
-        // 待機中のジョブを、接続先ごとに MaxRunningJobs 件まで実行に移す
+        // 待機中のジョブを、接続先ごとに MaxRunningJobs 件まで実行に移す。
+        // 一時停止中は新しく依頼しない (ComfyUI に依頼済みのものは、結果を受け取りに行く)
         private void StartJobs()
         {
             foreach (var job in jobs.Where(j => j.State == GenState.Waiting).ToList())
             {
+                if (paused && (job.PromptId.Length == 0 || job.Held)) continue;
                 string url = job.Request.Url;
                 if (jobs.Count(j => j.State == GenState.Running && j.Request.Url == url) >= MaxRunningJobs) continue;
                 RunJob(job);
             }
+            JobsChanged();
+        }
+
+        // ジョブの状態が変わった: 表示を合わせ、終わっていないジョブを書いておく
+        private void JobsChanged()
+        {
+            if (paused && !jobs.Any(j => j.IsActive)) paused = false;   // 次に登録したものが黙って止まらないように
+            foreach (var j in jobs) j.Paused = paused && j.State == GenState.Waiting;
             UpdateJobCount();
+            if (jobWindow != null) jobWindow.Refresh();
+            SaveJobs();
         }
 
         private async void RunJob(GenJob job)
         {
             job.State = GenState.Running;
+            job.Held = false;
+            job.Started = DateTime.Now;
             job.Status = "準備中...";
             ShowJobStatus(job);
 
@@ -1574,6 +1590,15 @@ namespace JRate
                 ShowJobStatus(job);
             }));
 
+            // ComfyUI が受け付けた番号は、続きから始めるときのために書いておく
+            Action<string> submitted = id => dispatcher.BeginInvoke(new Action(() =>
+            {
+                job.PromptId = id;
+                SaveJobs();
+            }));
+            Action<double> runTime = sec => dispatcher.BeginInvoke(new Action(() => job.RunTime = sec));
+            string startId = job.PromptId;
+
             List<string> result = null;
             Exception error = null;
             try
@@ -1581,7 +1606,8 @@ namespace JRate
                 result = await Task.Run(() =>
                 {
                     var files = ComfyVideo.Generate(job.Source, request.Url, request.WorkflowPath,
-                                                    request.FullPrompt, request.Seconds, report, token);
+                                                    request.FullPrompt, request.Seconds, report, token,
+                                                    startId, submitted, runTime, () => paused);
                     foreach (string f in files) ComfyHistory.Add(f, job.Source, request);   // どの設定で作ったかを残す
                     return files;
                 });
@@ -1589,7 +1615,17 @@ namespace JRate
             catch (Exception ex) { error = ex; }
 
             bool failed = false;
-            if (error is OperationCanceledException || (error != null && job.Cancel.IsCancellationRequested))
+            var heldError = error as GenerationHeldException;
+            if (heldError != null && !job.Cancel.IsCancellationRequested)
+            {
+                // 一時停止中に ComfyUI 側から消えた・つながらなくなった: 待機に戻して再開を待つ
+                job.State = GenState.Waiting;
+                job.Held = true;
+                if (!heldError.Sent) job.PromptId = "";
+                job.Status = "一時停止のため待機に戻しました";
+                statusText.Text = job.FileName + " を待機に戻しました";
+            }
+            else if (error is OperationCanceledException || (error != null && job.Cancel.IsCancellationRequested))
             {
                 job.State = GenState.Canceled;
                 job.Status = "キャンセルしました";
@@ -1613,6 +1649,7 @@ namespace JRate
                         if (!WriteRatingKeepTime(path, stars)) stars = 0;
 
                 job.Outputs = result;
+                if (job.RunTime == null) job.RunTime = (DateTime.Now - job.Started).TotalSeconds;   // ComfyUI の記録から分からなかったとき
                 job.State = GenState.Done;
                 job.Status = "生成しました: " + System.IO.Path.GetFileName(result[0]) +
                              (result.Count > 1 ? " ほか " + (result.Count - 1) + " 件" : "");
@@ -1651,7 +1688,12 @@ namespace JRate
             {
                 job.State = GenState.Canceled;
                 job.Status = "キャンセルしました";
-                UpdateJobCount();
+                if (job.PromptId.Length > 0)   // 一時停止で待機に戻した依頼済みのもの: ComfyUI の待ち行列からも外す
+                {
+                    string url = job.Request.Url, id = job.PromptId;
+                    Task.Run(() => ComfyVideo.CancelPromptQuietly(url, id));
+                }
+                JobsChanged();
             }
             else if (job.State == GenState.Running && !job.Cancel.IsCancellationRequested)
             {
@@ -1670,14 +1712,237 @@ namespace JRate
         {
             int running = jobs.Count(j => j.State == GenState.Running);
             int waiting = jobs.Count(j => j.State == GenState.Waiting);
-            if (running + waiting <= 1) return "";
-            return "  (実行中 " + running + " 件" + (waiting > 0 ? "・待機 " + waiting + " 件" : "") + ")";
+            string text = running + waiting <= 1 ? ""
+                : "  (実行中 " + running + " 件" + (waiting > 0 ? "・待機 " + waiting + " 件" : "") + ")";
+            return text + (paused ? "  [一時停止中]" : "");
         }
 
         private void UpdateJobCount()
         {
             int active = jobs.Count(j => j.IsActive);
-            jobsButton.Content = active > 0 ? "生成ジョブ (" + active + ")" : "生成ジョブ";
+            jobsButton.Content = active > 0 ? "生成ジョブ (" + active + (paused ? "・一時停止中" : "") + ")" : "生成ジョブ";
+        }
+
+        // ---------------- 一時停止 / 続きから始める (generation-standard 6 章) ----------------
+
+        // 一時停止中は新しく ComfyUI に依頼しない (依頼済みのものは最後まで生成して受け取る)。
+        // 裏のスレッド (ComfyVideo.Generate の held) からも読むので volatile
+        private volatile bool paused;
+
+        private void SetPaused(bool value)
+        {
+            if (value == paused || (value && !jobs.Any(j => j.IsActive))) return;
+            paused = value;
+            if (value)
+            {
+                int running = jobs.Count(j => j.State == GenState.Running);
+                statusText.Text = "生成ジョブを一時停止しました。" + (running > 0 ? "実行中の " + running + " 件は最後まで生成します。" : "");
+            }
+            else statusText.Text = "生成ジョブを再開しました。" + JobCounts();
+            StartJobs();
+        }
+
+        private const string JobsFile = "comfy_jobs.json";
+        // 終わっていないジョブを書けるのは、最初に起動した J-Rate だけ (この鍵を持っているもの)。
+        // 2 つ目以降の J-Rate は今までどおり、閉じるとジョブを受け取れない
+        private FileStream jobsLock;
+        private bool jobsLockTried;
+        private bool resumeAsked;          // 前回のジョブをまだ聞いていないうちは書かない (前回の分を消さないように)
+        private string savedJobs;          // 最後に書いた内容 (変わったときだけ書く)
+
+        private bool OwnsJobs
+        {
+            get
+            {
+                if (!jobsLockTried)
+                {
+                    jobsLockTried = true;
+                    try
+                    {
+                        string f = ComfySettings.FilePath("comfy_jobs.lock");
+                        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(f));
+                        jobsLock = new FileStream(f, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                    }
+                    catch { jobsLock = null; }
+                }
+                return jobsLock != null;
+            }
+        }
+
+        private void ReleaseJobsLock()
+        {
+            if (jobsLock != null) { jobsLock.Dispose(); jobsLock = null; }
+        }
+
+        private void SaveJobs()
+        {
+            if (!resumeAsked || !OwnsJobs) return;
+            var list = new List<Dictionary<string, object>>();
+            foreach (var job in jobs.Where(j => j.IsActive))
+            {
+                var r = job.Request;
+                var req = new Dictionary<string, object>();
+                req["connection"] = r.ConnectionName;
+                req["url"] = r.Url;
+                req["workflow"] = r.WorkflowName;
+                req["workflowPath"] = r.WorkflowPath;
+                req["prompt"] = r.Prompt;
+                req["seconds"] = r.Seconds;
+                req["basePrompt"] = r.BasePrompt;
+                var d = new Dictionary<string, object>();
+                d["source"] = job.Source;
+                d["batch"] = job.Batch;
+                d["promptId"] = job.PromptId;
+                d["request"] = req;
+                list.Add(d);
+            }
+            var root = new Dictionary<string, object>();
+            root["paused"] = paused;
+            root["jobs"] = list;
+            string text = ComfyVideo.NewSerializer().Serialize(root);
+            if (text == savedJobs) return;
+            ComfySettings.Save(JobsFile, text);
+            savedJobs = text;
+        }
+
+        // 前回終わらなかったジョブ (読めないものは除く)。paused は一時停止したまま閉じたか
+        private List<GenJob> LoadJobs(out bool wasPaused)
+        {
+            wasPaused = false;
+            var result = new List<GenJob>();
+            object root;
+            try { root = ComfyVideo.NewSerializer().DeserializeObject(ComfySettings.Load(JobsFile) ?? ""); }
+            catch { return result; }
+            var items = root as object[];   // 前の形 (一覧だけ) も読む
+            var dict = root as Dictionary<string, object>;
+            if (dict != null)
+            {
+                object o;
+                wasPaused = dict.TryGetValue("paused", out o) && o is bool && (bool)o;
+                items = dict.TryGetValue("jobs", out o) ? o as object[] : null;
+            }
+            foreach (var item in items ?? new object[0])
+            {
+                var d = item as Dictionary<string, object>;
+                object o;
+                var rq = d != null && d.TryGetValue("request", out o) ? o as Dictionary<string, object> : null;
+                string source = d != null ? ComfySettings.Str(d, "source") : "";
+                if (rq == null || source.Length == 0) continue;
+                var r = new GenRequest
+                {
+                    ConnectionName = ComfySettings.Str(rq, "connection"),
+                    Url = ComfySettings.Str(rq, "url"),
+                    WorkflowName = ComfySettings.Str(rq, "workflow"),
+                    WorkflowPath = ComfySettings.Str(rq, "workflowPath"),
+                    BasePrompt = ComfySettings.Str(rq, "basePrompt"),
+                };
+                if (rq.TryGetValue("prompt", out o) && o != null) r.Prompt = o.ToString();
+                if (rq.TryGetValue("seconds", out o) && o != null) r.Seconds = Convert.ToDouble(o);
+                bool batch = d.TryGetValue("batch", out o) && o is bool && (bool)o;
+                var job = new GenJob(source, r, batch);
+                job.PromptId = ComfySettings.Str(d, "promptId");
+                result.Add(job);
+            }
+            return result;
+        }
+
+        // 前回終わらなかったジョブがあれば、続きから始めるか中断するかを聞く (起動の直後)
+        private void OfferResume()
+        {
+            if (resumeAsked) return;
+            if (!OwnsJobs)
+            {
+                resumeAsked = true;   // 2 つ目の J-Rate: 前回のジョブは最初の J-Rate が受け持つ
+                return;
+            }
+            bool wasPaused;
+            var all = LoadJobs(out wasPaused);
+            resumeAsked = true;
+            if (all.Count == 0) return;
+            var found = all.Where(j => File.Exists(j.Source)).ToList();
+            int missing = all.Count - found.Count;
+            if (found.Count == 0)
+            {
+                SaveJobs();
+                MessageBox.Show(this, "前回終わらなかった生成ジョブが " + missing + " 件ありましたが、元の画像が見つからないため続けられません。",
+                                "生成ジョブ - J-Rate", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            if (wasPaused)
+            {
+                // 一時停止したまま閉じたもの: 聞かずに一時停止のまま一覧に戻す (依頼済みのものだけ結果を受け取る)
+                paused = true;
+                foreach (var j in found) jobs.Add(j);
+                StartJobs();
+                statusText.Text = "前回一時停止した生成ジョブが " + found.Count + " 件あります。ジョブ一覧の「再開」で続きを生成します。" +
+                                  (missing > 0 ? " (元の画像が見つからない " + missing + " 件は除きました)" : "");
+                return;
+            }
+
+            int sent = found.Count(j => j.PromptId.Length > 0);
+            string detail = "(ComfyUI に依頼済み " + sent + " 件・待機 " + (found.Count - sent) + " 件)" +
+                            (missing > 0 ? "\n元の画像が見つからない " + missing + " 件は除きます。" : "") +
+                            "\n\n続きから始める: 依頼済みのものは ComfyUI から結果を受け取ります (ComfyUI 側に残っていなければ依頼し直します)。" +
+                            "\nジョブを中断: 残りのジョブを取り消します。";
+            var dlg = new ChoiceDialog("生成ジョブ - J-Rate", "前回終わらなかった生成ジョブが " + found.Count + " 件あります。", detail,
+                                       new[] { "続きから始める", "ジョブを中断" }, 0, 0);   // Esc は「続きから始める」(うっかり捨てないように)
+            dlg.Owner = this;
+            dlg.ShowDialog();
+            if (dlg.Choice != 0)
+            {
+                // ComfyUI に依頼済みのものは、待ち行列から外しておく (つながらなければそのまま)
+                var drop = found.Where(j => j.PromptId.Length > 0).ToList();
+                Task.Run(() => { foreach (var j in drop) ComfyVideo.CancelPromptQuietly(j.Request.Url, j.PromptId); });
+                SaveJobs();
+                statusText.Text = "前回の生成ジョブ " + found.Count + " 件を中断しました。";
+                return;
+            }
+            foreach (var j in found) jobs.Add(j);
+            ShowJobs();
+            StartJobs();
+        }
+
+        // 生成中に閉じようとしたら、残すか捨てるかを確かめる。false なら閉じない
+        private bool ConfirmCloseJobs()
+        {
+            int active = jobs.Count(j => j.IsActive);
+            if (active == 0) return true;
+            if (!OwnsJobs)
+            {
+                // 2 つ目の J-Rate: ジョブを残せないので、今までどおり確かめるだけ
+                return MessageBox.Show(this, "生成中のジョブが " + active + " 件あります。終了しますか？\n\n" +
+                                             "終了すると、出来たファイルを受け取れません (ComfyUI 側で実行中のものは止まりません)。\n" +
+                                             "(続きから始められるのは、最初に起動した J-Rate だけです)",
+                                       "J-Rate", MessageBoxButton.OKCancel, MessageBoxImage.Warning) == MessageBoxResult.OK;
+            }
+            if (paused && !jobs.Any(j => j.State == GenState.Running))
+            {
+                SaveJobs();   // 一時停止して止まりきっているなら、聞かずに残す (次に起動したときも一時停止のまま)
+                return true;
+            }
+            string keep = paused ? "次に起動したときも一時停止のまま残ります (実行中のものは、起動したときに結果を受け取ります)。"
+                                 : "次に起動したときに続きから始められます。";
+            var dlg = new ChoiceDialog("生成中", "生成ジョブが " + active + " 件残っています。",
+                                       "残して閉じる: " + keep + "\n捨てて閉じる: 残りのジョブは取り消します。\n\n" +
+                                       "どちらでも、ComfyUI 側で実行中・順番待ちのものは止まりません。",
+                                       new[] { "残して閉じる", "捨てて閉じる", "やめる" }, 0, 2);
+            dlg.Owner = this;
+            dlg.ShowDialog();
+            if (dlg.Choice == 0)
+            {
+                SaveJobs();   // 今の状態を確実に書いておく
+                return true;
+            }
+            if (dlg.Choice == 1)
+            {
+                foreach (var j in jobs) j.Cancel.Cancel();
+                ComfySettings.Save(JobsFile, "{\"paused\":false,\"jobs\":[]}");
+                savedJobs = null;
+                resumeAsked = false;   // 裏のスレッドの片付けで書き直さないように
+                return true;
+            }
+            return false;
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -1715,7 +1980,7 @@ namespace JRate
                 jobWindow.Activate();
                 return;
             }
-            jobWindow = new JobWindow(jobs, CancelJob, ShowJobResult);
+            jobWindow = new JobWindow(jobs, CancelJob, ShowJobResult, () => paused, SetPaused);
             jobWindow.Owner = this;
             jobWindow.Closed += delegate { jobWindow = null; };
             jobWindow.Show();

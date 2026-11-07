@@ -85,6 +85,15 @@ namespace JRate
     }
 
     // ------------------------------------------------------------------
+    // 一時停止中なので、依頼し直さずに待機に戻す。Sent は ComfyUI 側に残っているかもしれないとき true
+    // ------------------------------------------------------------------
+    public class GenerationHeldException : Exception
+    {
+        public readonly bool Sent;
+        public GenerationHeldException(bool sent) : base("一時停止のため待機に戻しました") { Sent = sent; }
+    }
+
+    // ------------------------------------------------------------------
     // 1 回の生成に使う設定。名前は記録と表示のためのもの
     // ------------------------------------------------------------------
     public class GenRequest
@@ -955,39 +964,70 @@ namespace JRate
                                             string prompt, double? seconds, Action<string> progress,
                                             CancellationToken cancel)
         {
+            return Generate(imagePath, baseUrl, workflowPath, prompt, seconds, progress, cancel, null, null, null, null);
+        }
+
+        // promptId を渡すと、前に依頼したその実行の続きを待つ (アプリを閉じる・PC が落ちるなどで
+        // 受け取れなかったもの)。ComfyUI 側にもう残っていなければ、最初から依頼し直す (seed は変わる)。
+        // onSubmitted(promptId) は ComfyUI が実行を受け付けたとき、onRunTime(秒) は ComfyUI の記録から
+        // 生成にかかった時間が分かったときに呼ぶ (どちらも裏のスレッドから)。
+        // held() が true (一時停止中) のときは、ComfyUI から消えたものを依頼し直さず、つながらない状態が
+        // 続いたものも失敗にせず、GenerationHeldException を投げる (呼び出し側が待機に戻す)。
+        public static List<string> Generate(string imagePath, string baseUrl, string workflowPath,
+                                            string prompt, double? seconds, Action<string> progress,
+                                            CancellationToken cancel, string promptId, Action<string> onSubmitted,
+                                            Action<double> onRunTime, Func<bool> held)
+        {
             if (progress == null) progress = delegate { };
             baseUrl = (baseUrl ?? ComfySettings.DefaultUrl).TrimEnd('/');
-
-            // ワークフローの読み込みと確認
             var json = NewSerializer();
-            var workflow = LoadWorkflow(json, workflowPath);
-            var loadNodes = FindNodes(workflow, "LoadImage");
-            if (loadNodes.Count == 0)
-                throw new Exception("ワークフローに「Load Image」(LoadImage) ノードがありません。\n" + workflowPath);
 
-            // 画像のアップロード
-            cancel.ThrowIfCancellationRequested();
-            progress("ComfyUI へ画像を送信中...");
-            string uploadName = Upload(baseUrl, imagePath, json);
+            // ワークフローは依頼する直前に読み直す (一時停止中に直したものを、再開後のジョブから使う)
+            Func<string> submit = () =>
+            {
+                var workflow = LoadWorkflow(json, workflowPath);
+                var loadNodes = FindNodes(workflow, "LoadImage");
+                if (loadNodes.Count == 0)
+                    throw new Exception("ワークフローに「Load Image」(LoadImage) ノードがありません。\n" + workflowPath);
 
-            foreach (var node in loadNodes) Inputs(node)["image"] = uploadName;
-            RandomizeSeeds(workflow);
-            SetPrompt(workflow, prompt);
-            if (seconds != null) SetDuration(workflow, seconds.Value);
+                // 画像のアップロード
+                cancel.ThrowIfCancellationRequested();
+                progress("ComfyUI へ画像を送信中...");
+                string uploadName = Upload(baseUrl, imagePath, json);
 
-            // 実行を依頼
-            cancel.ThrowIfCancellationRequested();
-            progress("ComfyUI に実行を依頼中...");
-            var body = new Dictionary<string, object>();
-            body["prompt"] = workflow;
-            body["client_id"] = "j-rate-" + Guid.NewGuid().ToString("N");
-            string res = Request(baseUrl + "/prompt", "POST", "application/json",
-                                 Encoding.UTF8.GetBytes(json.Serialize(body)));
-            var resObj = json.DeserializeObject(res) as Dictionary<string, object>;
-            object pidObj;
-            if (resObj == null || !resObj.TryGetValue("prompt_id", out pidObj) || pidObj == null)
-                throw new Exception("ComfyUI が実行を受け付けませんでした。\n" + Shorten(res));
-            string promptId = pidObj.ToString();
+                foreach (var node in loadNodes) Inputs(node)["image"] = uploadName;
+                RandomizeSeeds(workflow);
+                SetPrompt(workflow, prompt);
+                if (seconds != null) SetDuration(workflow, seconds.Value);
+
+                // 実行を依頼
+                cancel.ThrowIfCancellationRequested();
+                progress("ComfyUI に実行を依頼中...");
+                var body = new Dictionary<string, object>();
+                body["prompt"] = workflow;
+                body["client_id"] = "j-rate-" + Guid.NewGuid().ToString("N");
+                string res = Request(baseUrl + "/prompt", "POST", "application/json",
+                                     Encoding.UTF8.GetBytes(json.Serialize(body)));
+                var resObj = json.DeserializeObject(res) as Dictionary<string, object>;
+                object pidObj;
+                if (resObj == null || !resObj.TryGetValue("prompt_id", out pidObj) || pidObj == null)
+                    throw new Exception("ComfyUI が実行を受け付けませんでした。\n" + Shorten(res));
+                string id = pidObj.ToString();
+                if (onSubmitted != null) onSubmitted(id);
+                return id;
+            };
+
+            int delay;
+            if (!string.IsNullOrEmpty(promptId))
+            {
+                progress("前回の続きを確かめています...");
+                delay = 0;   // 続きのときは、すぐに様子を見る
+            }
+            else
+            {
+                promptId = submit();
+                delay = 2000;
+            }
 
             // 完了を待つ
             var started = DateTime.Now;
@@ -995,13 +1035,16 @@ namespace JRate
             Dictionary<string, object> entry = null;
             while (true)
             {
-                if (cancel.WaitHandle.WaitOne(2000))
+                if (cancel.WaitHandle.WaitOne(delay))
                 {
                     CancelPrompt(baseUrl, json, promptId);
                     throw new OperationCanceledException();
                 }
+                delay = 2000;
                 try
                 {
+                    // 待ち行列を先に見てから記録を見る (その間に終わっても、記録のほうで拾える)
+                    string state = QueueStateOrNull(baseUrl, json, promptId);
                     string h = Request(baseUrl + "/history/" + Uri.EscapeDataString(promptId), "GET", null, null);
                     var hist = json.DeserializeObject(h) as Dictionary<string, object>;
                     object e;
@@ -1010,18 +1053,32 @@ namespace JRate
                         entry = e as Dictionary<string, object>;
                         if (entry != null) break;
                     }
-                    progress(QueueState(baseUrl, json, promptId) + " " + Elapsed(started));
                     failures = 0;
+                    if (state == null)
+                    {
+                        // 待ち行列にも記録にもない (ComfyUI を再起動したなど): 最初から依頼し直す
+                        if (held != null && held()) throw new GenerationHeldException(false);
+                        promptId = submit();
+                        started = DateTime.Now;
+                        continue;
+                    }
+                    progress(state + " " + Elapsed(started));
                 }
                 catch (WebException)
                 {
                     // ComfyUI が落ちた・再起動中など。1 分ほど続いたらあきらめる
-                    if (++failures >= 30) throw new Exception("ComfyUI との接続が切れました。(" + baseUrl + ")");
+                    if (++failures >= 30)
+                    {
+                        if (held != null && held()) throw new GenerationHeldException(true);   // 再開したときに、まだ残っていれば受け取る
+                        throw new Exception("ComfyUI との接続が切れました。(" + baseUrl + ")");
+                    }
                     progress("ComfyUI の応答待ち... " + Elapsed(started));
                 }
             }
 
             CheckStatus(entry);
+            double? runTime = RunSeconds(entry);
+            if (runTime != null && onRunTime != null) onRunTime(runTime.Value);
 
             // 出力ファイルを探して保存
             var outputs = FindOutputs(entry);
@@ -1036,13 +1093,14 @@ namespace JRate
                 cancel.ThrowIfCancellationRequested();
                 progress(outputs.Count > 1 ? "結果を受け取り中... (" + (saved.Count + 1) + " / " + outputs.Count + ")"
                                            : "結果を受け取り中...");
-                string dest = UniquePath(Path.Combine(Path.GetDirectoryName(imagePath),
-                                         Path.GetFileNameWithoutExtension(imagePath) + (output.IsVideo ? "_video" : "_i2i") +
-                                         Path.GetExtension(output.Filename)));
+                string wanted = Path.Combine(Path.GetDirectoryName(imagePath),
+                                             Path.GetFileNameWithoutExtension(imagePath) + (output.IsVideo ? "_video" : "_i2i") +
+                                             Path.GetExtension(output.Filename));
                 string url = baseUrl + "/view?filename=" + Uri.EscapeDataString(output.Filename)
                            + "&subfolder=" + Uri.EscapeDataString(output.Subfolder)
                            + "&type=" + Uri.EscapeDataString(output.Type);
-                string temp = dest + ".part";
+                string temp = wanted + "." + Guid.NewGuid().ToString("N").Substring(0, 8) + ".part";
+                string dest;
                 try
                 {
                     using (var wc = new WebClient())
@@ -1050,7 +1108,12 @@ namespace JRate
                         wc.Proxy = null;
                         wc.DownloadFile(url, temp);
                     }
-                    File.Move(temp, dest);
+                    // 同時に終わったジョブが同じ名前を選ばないよう、名前を決めてから置くまでを 1 件ずつ行う
+                    lock (SaveLock)
+                    {
+                        dest = UniquePath(wanted);
+                        File.Move(temp, dest);
+                    }
                 }
                 finally
                 {
@@ -1059,6 +1122,82 @@ namespace JRate
                 saved.Add(dest);
             }
             return saved;
+        }
+
+        private static readonly object SaveLock = new object();
+
+        // 待ち行列での様子。待ち行列にいないと分かったときは null。
+        // つながらないときは WebException をそのまま投げる (呼び出し元で待ち続ける)
+        private static string QueueStateOrNull(string baseUrl, JavaScriptSerializer json, string promptId)
+        {
+            string text;
+            try { text = Request(baseUrl + "/queue", "GET", null, null); }
+            catch (WebException ex)
+            {
+                if (ex.Response == null) throw;   // 接続できない
+                return "生成中";
+            }
+            try
+            {
+                var q = json.DeserializeObject(text) as Dictionary<string, object>;
+                if (q == null) return "生成中";
+                object running, pending;
+                if (q.TryGetValue("queue_running", out running) && ContainsPrompt(running, promptId) >= 0) return "生成中";
+                if (q.TryGetValue("queue_pending", out pending))
+                {
+                    var arr = pending as IEnumerable;
+                    if (arr != null)
+                    {
+                        var list = arr.Cast<object>().OfType<IList>().Where(x => x.Count >= 2)
+                                      .OrderBy(x => Convert.ToDouble(x[0])).ToList();
+                        int idx = list.FindIndex(x => Convert.ToString(x[1]) == promptId);
+                        if (idx >= 0) return "順番待ち (" + (idx + 1) + " 番目)";
+                    }
+                }
+                return null;
+            }
+            catch { return "生成中"; }
+        }
+
+        // 記録の execution_start から execution_success までの秒数 (分からなければ null)
+        private static double? RunSeconds(Dictionary<string, object> entry)
+        {
+            try
+            {
+                object st, msgs;
+                var status = entry.TryGetValue("status", out st) ? st as Dictionary<string, object> : null;
+                if (status == null || !status.TryGetValue("messages", out msgs) || !(msgs is IEnumerable)) return null;
+                double? start = null, end = null;
+                foreach (var m in (IEnumerable)msgs)
+                {
+                    var pair = m as IList;
+                    if (pair == null || pair.Count < 2) continue;
+                    var d = pair[1] as Dictionary<string, object>;
+                    object ts;
+                    if (d == null || !d.TryGetValue("timestamp", out ts) || ts == null) continue;
+                    string kind = Convert.ToString(pair[0]);
+                    if (kind == "execution_start") start = Convert.ToDouble(ts);
+                    else if (kind == "execution_success") end = Convert.ToDouble(ts);
+                }
+                if (start == null || end == null || end < start) return null;
+                return (end.Value - start.Value) / 1000;
+            }
+            catch { return null; }
+        }
+
+        // 「1:05」の形 (1 時間を超えたら「1:02:05」)
+        public static string FormatElapsed(double seconds)
+        {
+            int s = (int)seconds;
+            return s >= 3600 ? string.Format("{0}:{1:00}:{2:00}", s / 3600, s % 3600 / 60, s % 60)
+                             : string.Format("{0}:{1:00}", s / 60, s % 60);
+        }
+
+        // ComfyUI に依頼済みの実行を取り消す (つながらなければ何もしない)
+        public static void CancelPromptQuietly(string baseUrl, string promptId)
+        {
+            try { CancelPrompt((baseUrl ?? ComfySettings.DefaultUrl).TrimEnd('/'), NewSerializer(), promptId); }
+            catch { }
         }
 
         // ComfyUI 側の実行を取り消す。順番待ちなら待ち行列から外し、実行中なら中断する

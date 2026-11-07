@@ -24,13 +24,18 @@ namespace JRate
     public class GenJob : INotifyPropertyChanged
     {
         public readonly string Source;        // 元画像のパス
-        public readonly GenRequest Request;
+        public GenRequest Request;            // 頼んだ時点の内容 (あとで設定を変えても、この内容で続ける)
         public readonly bool Batch;           // まとめて生成の 1 件 (エラーの窓を出さない、完成しても移動しない)
         public readonly CancellationTokenSource Cancel = new CancellationTokenSource();
         public List<string> Outputs;          // 保存したファイル (完了後)
+        public string PromptId = "";          // ComfyUI が受け付けた番号 (続きから始めるときに使う)
+        public bool Held;                     // 一時停止中に待機へ戻したもの (再開するまで実行に移さない)
+        public DateTime Started;              // 実行に移った時刻
 
         private GenState state = GenState.Waiting;
         private string status = "";
+        private bool paused;                  // 一時停止中の待機 (状態の欄に「一時停止」と出す)
+        private double? runTime;              // 生成にかかった秒数 (完了したときに決まる)
 
         public GenJob(string source, GenRequest request, bool batch)
         {
@@ -48,6 +53,23 @@ namespace JRate
             set { state = value; OnPropertyChanged("State"); OnPropertyChanged("StateText"); }
         }
 
+        public bool IsRunning { get { return state == GenState.Running; } }
+
+        // 一時停止中かどうか (ジョブ一覧の表示用。待機中のものだけ「一時停止」と出す)
+        public bool Paused
+        {
+            get { return paused; }
+            set { if (paused != value) { paused = value; OnPropertyChanged("StateText"); } }
+        }
+
+        public double? RunTime
+        {
+            get { return runTime; }
+            set { runTime = value; OnPropertyChanged("RunTimeText"); }
+        }
+
+        public string RunTimeText { get { return runTime == null ? "" : ComfyVideo.FormatElapsed(runTime.Value); } }
+
         // まだ終わっていない (待機中か実行中)
         public bool IsActive { get { return state == GenState.Waiting || state == GenState.Running; } }
 
@@ -57,7 +79,7 @@ namespace JRate
             {
                 switch (state)
                 {
-                    case GenState.Waiting: return "待機中";
+                    case GenState.Waiting: return paused ? "一時停止" : "待機中";
                     case GenState.Running: return "実行中";
                     case GenState.Done: return "完了";
                     case GenState.Failed: return "失敗";
@@ -94,12 +116,18 @@ namespace JRate
     {
         private readonly ObservableCollection<GenJob> jobs;
         private readonly ListView list;
-        private readonly Button cancelButton, cancelAllButton, showButton, clearButton;
+        private readonly Button pauseButton, cancelButton, cancelAllButton, showButton, clearButton;
+        private readonly TextBlock runningText;
+        private readonly Func<bool> isPaused;
+        private GenJob lastScrolled;   // 実行に移ったのを見えるようにした行 (同じものでは何度もスクロールしない)
 
         // cancel : そのジョブを取り消す / show : そのジョブの結果をメイン画面に表示する
-        public JobWindow(ObservableCollection<GenJob> jobs, Action<GenJob> cancel, Action<GenJob> show)
+        // isPaused / setPaused : 一時停止しているか / 一時停止・再開する
+        public JobWindow(ObservableCollection<GenJob> jobs, Action<GenJob> cancel, Action<GenJob> show,
+                         Func<bool> isPaused, Action<bool> setPaused)
         {
             this.jobs = jobs;
+            this.isPaused = isPaused;
             Title = "生成ジョブ - J-Rate";
             Width = 760;
             Height = 380;
@@ -116,6 +144,11 @@ namespace JRate
             DockPanel.SetDock(close, Dock.Right);
             buttons.Children.Add(close);
             var left = new StackPanel { Orientation = Orientation.Horizontal };
+            pauseButton = NewButton("一時停止");
+            pauseButton.ToolTip = "新しく ComfyUI に頼むのをやめます (実行中のものは最後まで生成して受け取ります)。\n" +
+                                  "一時停止中にワークフローを直せば、再開したあとのジョブから直した中身で生成します。\n" +
+                                  "一時停止のままアプリを閉じると、次に起動したときも一時停止のまま残ります。";
+            left.Children.Add(pauseButton);
             cancelButton = NewButton("キャンセル");
             cancelAllButton = NewButton("すべてキャンセル");
             showButton = NewButton("結果を表示");
@@ -127,15 +160,33 @@ namespace JRate
             buttons.Children.Add(left);
             root.Children.Add(buttons);
 
+            // 今どれを処理しているかを、一覧をスクロールしても見えるように上に出す
+            runningText = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8) };
+            DockPanel.SetDock(runningText, Dock.Top);
+            root.Children.Add(runningText);
+
             var grid = new GridView();
             grid.Columns.Add(new GridViewColumn { Header = "ファイル", Width = 190, DisplayMemberBinding = new Binding("FileName") });
             grid.Columns.Add(new GridViewColumn { Header = "ワークフロー", Width = 130, DisplayMemberBinding = new Binding("Workflow") });
             grid.Columns.Add(new GridViewColumn { Header = "状態", Width = 70, DisplayMemberBinding = new Binding("StateText") });
-            grid.Columns.Add(new GridViewColumn { Header = "内容", Width = 320, DisplayMemberBinding = new Binding("Status") });
+            grid.Columns.Add(new GridViewColumn { Header = "時間", Width = 60, DisplayMemberBinding = new Binding("RunTimeText") });
+            grid.Columns.Add(new GridViewColumn { Header = "内容", Width = 300, DisplayMemberBinding = new Binding("Status") });
             list = new ListView { View = grid, ItemsSource = jobs, SelectionMode = SelectionMode.Extended };
+            // 実行中の行は色を付けて太字に
+            var rowStyle = new Style(typeof(ListViewItem));
+            var running = new DataTrigger { Binding = new Binding("State"), Value = GenState.Running };
+            running.Setters.Add(new Setter(Control.FontWeightProperty, FontWeights.Bold));
+            running.Setters.Add(new Setter(Control.BackgroundProperty, new SolidColorBrush(Color.FromArgb(50, 46, 125, 50))));
+            rowStyle.Triggers.Add(running);
+            list.ItemContainerStyle = rowStyle;
             root.Children.Add(list);
             Content = root;
 
+            pauseButton.Click += delegate
+            {
+                setPaused(!isPaused());
+                Refresh();
+            };
             cancelButton.Click += delegate
             {
                 foreach (var job in list.SelectedItems.Cast<GenJob>().ToList()) cancel(job);
@@ -167,13 +218,13 @@ namespace JRate
             // ジョブの状態が変わったらボタンの有効・無効を合わせる
             PropertyChangedEventHandler changed = delegate(object s, PropertyChangedEventArgs e)
             {
-                if (e.PropertyName == "State") UpdateButtons();
+                if (e.PropertyName == "State" || e.PropertyName == "Status") Refresh();
             };
             System.Collections.Specialized.NotifyCollectionChangedEventHandler listChanged = delegate(object s, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
             {
                 if (e.OldItems != null) foreach (GenJob j in e.OldItems) j.PropertyChanged -= changed;
                 if (e.NewItems != null) foreach (GenJob j in e.NewItems) j.PropertyChanged += changed;
-                UpdateButtons();
+                Refresh();
             };
             foreach (var j in jobs) j.PropertyChanged += changed;
             jobs.CollectionChanged += listChanged;
@@ -182,6 +233,43 @@ namespace JRate
                 jobs.CollectionChanged -= listChanged;
                 foreach (var j in jobs) j.PropertyChanged -= changed;
             };
+            Refresh();
+        }
+
+        // 一覧の上の「実行中: ...」とボタンを、今の状態に合わせる
+        public void Refresh()
+        {
+            var runningJobs = jobs.Where(j => j.IsRunning).ToList();
+            int waiting = jobs.Count(j => j.IsActive && !j.IsRunning);
+            var lines = runningJobs.Select(j => "実行中: " + j.FileName + "  " + j.Status).ToList();
+            if (isPaused())
+            {
+                lines.Add(runningJobs.Count > 0
+                    ? "一時停止中: 実行中のものが終わったら止まります (待機 " + waiting + " 件)"
+                    : "一時停止中 (待機 " + waiting + " 件)。「再開」で続きを生成します");
+                runningText.Foreground = new SolidColorBrush(Color.FromRgb(0xE6, 0x51, 0x00));
+                runningText.FontWeight = FontWeights.Bold;
+            }
+            else if (runningJobs.Count > 0)
+            {
+                if (waiting > 0) lines.Add("待機 " + waiting + " 件");
+                runningText.Foreground = new SolidColorBrush(Color.FromRgb(0x2E, 0x7D, 0x32));
+                runningText.FontWeight = FontWeights.Bold;
+            }
+            else
+            {
+                lines.Add("実行中のジョブはありません");
+                runningText.Foreground = Brushes.DimGray;
+                runningText.FontWeight = FontWeights.Normal;
+            }
+            runningText.Text = string.Join("\n", lines);
+            // 新しく実行に移ったものが見えるようにする
+            var first = runningJobs.FirstOrDefault();
+            if (first != null && first != lastScrolled)
+            {
+                lastScrolled = first;
+                list.ScrollIntoView(first);
+            }
             UpdateButtons();
         }
 
@@ -193,6 +281,8 @@ namespace JRate
         private void UpdateButtons()
         {
             var selected = list.SelectedItems.Cast<GenJob>().ToList();
+            pauseButton.Content = isPaused() ? "再開" : "一時停止";
+            pauseButton.IsEnabled = isPaused() || jobs.Any(j => j.IsActive);
             cancelButton.IsEnabled = selected.Any(j => j.IsActive);
             cancelAllButton.IsEnabled = jobs.Any(j => j.IsActive);
             showButton.IsEnabled = selected.Count == 1 && selected[0].Outputs != null;
@@ -352,6 +442,46 @@ namespace JRate
         {
             try { return Clipboard.ContainsText() ? GenParams.Parse(Clipboard.GetText()) : null; }
             catch { return null; }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // ボタンに名前を付けて選ばせる確認 (「残して閉じる / 捨てて閉じる / やめる」など)。
+    // Choice は押したボタンの番号 (Esc や × は escapeIndex)
+    // ------------------------------------------------------------------
+    public class ChoiceDialog : Window
+    {
+        public int Choice { get; private set; }
+
+        public ChoiceDialog(string title, string message, string detail, string[] buttons, int defaultIndex, int escapeIndex)
+        {
+            Title = title;
+            Width = 480;
+            SizeToContent = SizeToContent.Height;
+            ResizeMode = ResizeMode.NoResize;
+            WindowStartupLocation = WindowStartupLocation.CenterOwner;
+            ShowInTaskbar = false;
+            Choice = escapeIndex;
+
+            var panel = new StackPanel { Margin = new Thickness(16) };
+            panel.Children.Add(new TextBlock { Text = message, FontWeight = FontWeights.Bold, TextWrapping = TextWrapping.Wrap });
+            if (!string.IsNullOrEmpty(detail))
+                panel.Children.Add(new TextBlock { Text = detail, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
+            var row = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 16, 0, 0) };
+            for (int i = 0; i < buttons.Length; i++)
+            {
+                int index = i;
+                var b = new Button
+                {
+                    Content = buttons[i], MinWidth = 90, Padding = new Thickness(10, 2, 10, 2),
+                    Margin = new Thickness(i == 0 ? 0 : 8, 0, 0, 0), IsDefault = i == defaultIndex, IsCancel = i == escapeIndex
+                };
+                b.Click += delegate { Choice = index; DialogResult = true; };
+                row.Children.Add(b);
+                if (i == defaultIndex) Loaded += delegate { b.Focus(); };
+            }
+            panel.Children.Add(row);
+            Content = panel;
         }
     }
 
