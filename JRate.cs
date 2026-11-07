@@ -1157,7 +1157,9 @@ namespace JRate
                 screenMax = Math.Max(screenMax, Math.Max(s.Bounds.Width, s.Bounds.Height));
             mainMaxSize = Math.Max(1920, screenMax);
 
-            statusText.Text = HelpText;
+            // 生成の登録は PromptWordCrafter・ImageMimicArt と共有する (%APPDATA%\GenCommon)。初めてなら J-Rate の設定を移す
+            string shared = ComfySettings.StartShared();
+            statusText.Text = shared.Length > 0 ? "共有の設定: " + shared : HelpText;
             UpdateFilterButtons();
             UpdateInfo();
 
@@ -3849,11 +3851,14 @@ namespace JRate
             private readonly Func<string, string> normalize;
             private readonly Action<ComfyPreset[]> save;
             private readonly Action<int, int> swapped;   // 2 つの番号を入れ替えたあとに呼ぶ (番号で覚えている設定の付け替え用)
+            // 共有の一覧 (接続先・ワークフロー) は、ほかのアプリで足したものを消さないよう書く前に読み直す (null なら読み直さない)
+            private readonly Func<ComfyPreset[]> reload;
             private bool relabeling;   // 一覧の表示をコードから書き換えている間
 
             public PresetTab(ComfyPreset[] list, string caption, string nameCaption, string valueCaption,
                              TextBox valueBox, Button sideButton, Func<ComfyPreset, int, string> label,
-                             Func<string, string> normalize, Action<ComfyPreset[]> save, Action<int, int> swapped)
+                             Func<string, string> normalize, Action<ComfyPreset[]> save, Action<int, int> swapped,
+                             Func<ComfyPreset[]> reload = null)
             {
                 List = list;
                 ValueBox = valueBox;
@@ -3861,6 +3866,7 @@ namespace JRate
                 this.normalize = normalize;
                 this.save = save;
                 this.swapped = swapped;
+                this.reload = reload;
 
                 Panel.Children.Add(new TextBlock { Text = caption });
                 for (int i = 0; i < list.Length; i++) Box.Items.Add(label(list[i], i));
@@ -3912,26 +3918,45 @@ namespace JRate
             // 欄の名前と値を、選んでいる番号のプリセットとして保存する (キャンセルしても残る)
             public void Store()
             {
-                List[Shown].Name = NameBox.Text.Trim();
-                List[Shown].Value = Value;
+                string name = NameBox.Text.Trim(), value = Value;
+                Reload();
+                List[Shown].Name = name;
+                List[Shown].Value = value;
                 Saved();
             }
 
             // 選んでいる番号を未登録に戻す
             public void Delete()
             {
+                Reload();
                 List[Shown].Clear();
                 NameBox.Text = "";
                 ValueBox.Text = "";
                 Saved();
             }
 
-            private void Saved()
+            private void Reload()
+            {
+                if (reload == null) return;
+                var fresh = reload();
+                for (int i = 0; i < List.Length && i < fresh.Length; i++)
+                {
+                    List[i].Name = fresh[i].Name;
+                    List[i].Value = fresh[i].Value;
+                }
+            }
+
+            private void Relabel()
             {
                 relabeling = true;
-                Box.Items[Shown] = label(List[Shown], Shown);
+                for (int i = 0; i < List.Length; i++) Box.Items[i] = label(List[i], i);
                 Box.SelectedIndex = Shown;
                 relabeling = false;
+            }
+
+            private void Saved()
+            {
+                Relabel();
                 save(List);
             }
 
@@ -3941,15 +3966,12 @@ namespace JRate
             {
                 int a = Shown, b = Shown + step;
                 if (a < 0 || b < 0 || b >= List.Length) return;
+                Reload();
                 var t = List[a];
                 List[a] = List[b];
                 List[b] = t;
-                relabeling = true;
-                Box.Items[a] = label(List[a], a);
-                Box.Items[b] = label(List[b], b);
-                Box.SelectedIndex = b;
-                relabeling = false;
                 Shown = b;
+                Relabel();
                 save(List);
                 swapped(a, b);
             }
@@ -3992,7 +4014,8 @@ namespace JRate
                 "ComfyUI の URL",
                 new TextBox { Padding = new Thickness(2, 3, 2, 3) }, test,
                 (p, i) => p.Label(i), s => s.Trim().TrimEnd('/'), list => ComfySettings.Presets = list,
-                (a, b) => ComfySettings.ActivePreset = Swapped(ComfySettings.ActivePreset, a, b));
+                (a, b) => ComfySettings.SwapIndexes(ComfySettings.ConnectionsFile, a, b),   // 共有なので、すべてのアプリの番号を直す
+                () => ComfySettings.Presets);
 
             var browse = new Button { Content = "参照...", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0) };
             workflow = new PresetTab(ComfySettings.Workflows,
@@ -4001,7 +4024,8 @@ namespace JRate
                 "ワークフロー (ComfyUI のメニュー「Export (API)」で保存した JSON)",
                 new TextBox { Padding = new Thickness(2, 3, 2, 3) }, browse,
                 (p, i) => p.FileLabel(i), s => s.Trim().Trim('"'), list => ComfySettings.Workflows = list,
-                (a, b) => ComfySettings.ActiveWorkflow = Swapped(ComfySettings.ActiveWorkflow, a, b));
+                (a, b) => ComfySettings.SwapIndexes(ComfySettings.WorkflowsFile, a, b),
+                () => ComfySettings.Workflows);
             workflow.Panel.Children.Add(new TextBlock
             {
                 Text = "ワークフローの「Load Image」ノードの画像が、右クリックした画像に差し替わります。" +
@@ -4165,10 +4189,12 @@ namespace JRate
             {
                 var ofd = new Microsoft.Win32.OpenFileDialog();
                 ofd.Title = "生成の設定をインポート";
-                ofd.Filter = "J-Rate の生成設定 (*.json)|*.json|すべてのファイル (*.*)|*.*";
+                ofd.Filter = "生成設定 (*.json)|*.json|すべてのファイル (*.*)|*.*";
                 if (ofd.ShowDialog(this) != true) return;
                 string text = "今の生成の設定 (接続先・ワークフロー・プロンプト・セットなど) を、" +
                               "このファイルの内容にすべて置き換えます。よろしいですか？\n\n" + ofd.FileName +
+                              "\n\n接続先・ワークフロー・ベースプロンプト・エンハンサー・読み取りプリセットは " +
+                              "J-Rate・PromptWordCrafter・ImageMimicArt で共有しているので、ほかのアプリの設定も変わります。" +
                               "\n\n今の設定は次のファイルに控えを残します。\n" + ComfySettings.ImportBackupPath;
                 if (MessageBox.Show(this, text, Title, MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
                     return;
@@ -4343,6 +4369,7 @@ namespace JRate
         private readonly List<string> workflowName = new List<string>();
         private readonly TextBox promptBox, secondsBox, repeatBox;
         private readonly TextBlock workflowError, promptLabel, secondsUnit, baseHint;
+        private readonly CheckBox baseCheck;   // 外すとベースプロンプトを付けずに送る (前回の状態を覚える)
         private string basePrompt = "";   // 選んでいるワークフローで使うベースプロンプト (動画用か画像用)
         private readonly DockPanel promptRow;
         private readonly Button okButton;
@@ -4509,14 +4536,20 @@ namespace JRate
             panel.Children.Add(promptBox);
 
             // プロンプトのあとに続けて送るベースプロンプト (動画用か画像用か) を見せておく。中身は ApplyWorkflow が入れる
+            // 行はチェックボックスになっていて、外すとベースプロンプトを付けずに送る (generation-standard 4 章)
             baseHint = new TextBlock
             {
                 TextTrimming = TextTrimming.CharacterEllipsis,
-                Foreground = Brushes.DimGray,
+                Foreground = Brushes.DimGray
+            };
+            baseCheck = new CheckBox
+            {
+                Content = baseHint,
+                IsChecked = ComfySettings.UseBasePrompt,
                 Margin = new Thickness(0, -8, 0, 12),
                 Visibility = Visibility.Collapsed
             };
-            panel.Children.Add(baseHint);
+            panel.Children.Add(baseCheck);
 
             var secRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 16) };
             secRow.Children.Add(new TextBlock { Text = "長さ", VerticalAlignment = VerticalAlignment.Center });
@@ -4600,6 +4633,7 @@ namespace JRate
             settings.Click += delegate
             {
                 Reopen = Fields();
+                ComfySettings.UseBasePrompt = baseCheck.IsChecked == true;   // 開き直したときも同じ状態に
                 Close();
             };
             copy.Click += delegate { GenClipboard.Copy(copy, copyLabel, Fields()); };
@@ -4832,8 +4866,9 @@ namespace JRate
             if (promptBox.IsEnabled)
             {
                 request.Prompt = promptBox.Text.Trim();
-                request.BasePrompt = basePrompt;
+                request.BasePrompt = baseCheck.IsChecked == true ? basePrompt : "";
                 ComfySettings.Prompt = request.Prompt;
+                ComfySettings.UseBasePrompt = baseCheck.IsChecked == true;
             }
             int sel = Math.Max(presetBox.SelectedIndex, 0);
             request.Url = presetUrl[sel];
@@ -4887,8 +4922,8 @@ namespace JRate
             basePrompt = hasPrompt ? ComfySettings.BasePromptFor(video) : "";
             baseHint.Text = "＋ ベースプロンプト (" + (video ? "動画用" : "画像用") + ") : " +
                             basePrompt.Replace("\r", "").Replace('\n', ' ');
-            baseHint.ToolTip = basePrompt;
-            baseHint.Visibility = basePrompt.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+            baseCheck.ToolTip = basePrompt + "\n\n(チェックを外すと、ベースプロンプトを付けずに送ります)";
+            baseCheck.Visibility = basePrompt.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
 
             bool hasSeconds = workflowSeconds != null;
             double cur;

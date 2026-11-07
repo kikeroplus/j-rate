@@ -70,6 +70,10 @@ namespace JRate
     {
         public string Name = "", Url = "", Workflow = "", Prompt = "", Seconds = "";
         public int PromptPreset = -1;   // 保存したときに選んでいたプロンプトのプリセットの番号 (0 始まり。なければ -1)
+        // 読み取りプリセットとエンハンサーは共有の登録なので名前で覚える (generation-standard 2 章)。
+        // null はその項目を持たない (前の形式で保存した) もので、選んでもその欄は変えない
+        public string Reader, Enhancer;   // 名前 (空 = なし)
+        public bool? Reread;              // 読み取り済みでも読み直す
 
         public bool IsEmpty { get { return Url.Length == 0 && Workflow.Length == 0; } }
 
@@ -249,11 +253,35 @@ namespace JRate
     }
 
     // ------------------------------------------------------------------
-    // 設定 (%APPDATA%\J-Rate\comfy_*.txt)
+    // 設定。接続先・ワークフロー・ベースプロンプト・エンハンサー・読み取りプリセット・LLM の接続は
+    // J-Rate・PromptWordCrafter・ImageMimicArt で共有する (%APPDATA%\GenCommon)。
+    // それ以外 (使用中の番号・前回の値・セット・記録) は %APPDATA%\J-Rate (generation-standard 8・11 章)。
+    // ファイルの名前はどちらも同じなので、FilePath が名前で置き場所を振り分ける
     // ------------------------------------------------------------------
     public static class ComfySettings
     {
         public const string DefaultUrl = "http://127.0.0.1:8188";
+        public const string AppName = "J-Rate";
+        public const string ConnectionsFile = "comfy_presets.txt";
+        public const string WorkflowsFile = "comfy_workflows.txt";
+        public const string EnhancerFile = "enhancer_presets.json";
+        public const string ReaderFile = "reader_presets.json";
+        private const string AppsFile = "apps.txt";
+        private const string MergedFile = "gencommon_merged.txt";   // J-Rate の設定を共有に移した印
+        private static readonly string[] LlmFiles = { "llm_url.txt", "reader_model.txt", "enhance_model.txt", "reader_max_side.txt" };
+        private static readonly HashSet<string> SharedFiles = new HashSet<string>(new[]
+        {
+            ConnectionsFile, WorkflowsFile, "comfy_base_prompt_video.txt", "comfy_base_prompt_image.txt",
+            EnhancerFile, ReaderFile, AppsFile, "llm_url.txt", "reader_model.txt", "enhance_model.txt", "reader_max_side.txt"
+        });
+        // 共有の一覧を指す、アプリごとの番号のファイル (上へ / 下へで入れ替えたとき、すべてのアプリで直す)
+        private static readonly Dictionary<string, string[]> IndexFiles = new Dictionary<string, string[]>
+        {
+            { ConnectionsFile, new[] { "comfy_preset.txt" } },
+            { WorkflowsFile, new[] { "comfy_workflow_preset.txt" } },
+            { EnhancerFile, new[] { "enhancer_generate.txt", "enhance_preset.txt" } },
+            { ReaderFile, new[] { "reader_generate.txt", "reader_preset.txt" } },
+        };
         public const int PresetCount = 10;
         public const int WorkflowCount = 100;   // ワークフローとプロンプトは多く登録できる
         public const int PromptCount = 100;
@@ -261,8 +289,8 @@ namespace JRate
         // 接続先のプリセット (comfy_presets.txt)。いつも PresetCount 件 (未登録のものは空)
         public static ComfyPreset[] Presets
         {
-            get { return LoadPresets("comfy_presets.txt", "comfy_url.txt", DefaultUrl, PresetCount); }
-            set { SavePresets("comfy_presets.txt", value, PresetCount); }
+            get { return LoadPresets(ConnectionsFile, "comfy_url.txt", DefaultUrl, PresetCount); }
+            set { SavePresets(ConnectionsFile, value, PresetCount); }
         }
 
         // 使う接続先の番号 (0 始まり)
@@ -276,8 +304,8 @@ namespace JRate
         // 値は ComfyUI の「Export (API)」で保存したワークフロー JSON のパス
         public static ComfyPreset[] Workflows
         {
-            get { return LoadPresets("comfy_workflows.txt", "comfy_workflow.txt", "", WorkflowCount); }
-            set { SavePresets("comfy_workflows.txt", value, WorkflowCount); }
+            get { return LoadPresets(WorkflowsFile, "comfy_workflow.txt", "", WorkflowCount); }
+            set { SavePresets(WorkflowsFile, value, WorkflowCount); }
         }
 
         // 使うワークフローの番号 (0 始まり)
@@ -364,6 +392,13 @@ namespace JRate
             return video ? BasePromptVideo : BasePromptImage;
         }
 
+        // ベースプロンプトを付けて送るか (生成の画面のチェック。既定はオン。前回の値として覚える)
+        public static bool UseBasePrompt
+        {
+            get { return Load("comfy_use_base_prompt.txt") != "0"; }
+            set { Save("comfy_use_base_prompt.txt", value ? "1" : "0"); }
+        }
+
         // プロンプトのプリセット。値はプロンプトの本文 (改行があるので 1 件ずつ
         // comfy_prompt_1.txt ～ comfy_prompt_100.txt)、名前は comfy_prompt_names.txt に「番号 <Tab> 名前」。
         // いつも PromptCount 件 (未登録のものは空)
@@ -441,6 +476,10 @@ namespace JRate
                         list[i].Seconds = Str(d, "seconds");
                         int pp;
                         list[i].PromptPreset = int.TryParse(Str(d, "promptPreset"), out pp) && pp >= 1 && pp <= PromptCount ? pp - 1 : -1;
+                        if (d.ContainsKey("reader")) list[i].Reader = Str(d, "reader");
+                        if (d.ContainsKey("enhancer")) list[i].Enhancer = Str(d, "enhancer");
+                        object rr;
+                        if (d.TryGetValue("reread", out rr) && rr is bool) list[i].Reread = (bool)rr;
                     }
                 }
                 catch { }
@@ -458,6 +497,9 @@ namespace JRate
                     d["prompt"] = s.Prompt;
                     d["seconds"] = s.Seconds;
                     d["promptPreset"] = s.PromptPreset + 1;
+                    if (s.Reader != null) d["reader"] = s.Reader;
+                    if (s.Reread != null) d["reread"] = s.Reread.Value;
+                    if (s.Enhancer != null) d["enhancer"] = s.Enhancer;
                     arr.Add(d);
                 }
                 Save("comfy_sets.txt", ComfyVideo.NewSerializer().Serialize(arr));
@@ -498,21 +540,37 @@ namespace JRate
             get { return FilePath("backup_before_import.json"); }
         }
 
+        // 共有するファイルのうち comfy_*.txt 以外のもの (エンハンサー・読み取りプリセット・LLM の接続)。
+        // 前の形式のエクスポートには入っていないので、インポートでは入っているときだけ置き換える
+        private static bool IsExtraSettingFile(string name)
+        {
+            return name == EnhancerFile || name == ReaderFile || Array.IndexOf(LlmFiles, name) >= 0;
+        }
+
         private static bool IsSettingFile(string name)
         {
+            if (IsExtraSettingFile(name)) return true;
             if (!name.StartsWith("comfy_") || !name.EndsWith(".txt") || name == "comfy_history.txt") return false;
             foreach (char c in name)
                 if (!(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_' || c == '.')) return false;
             return true;
         }
 
+        // 今の設定のファイル (共有のものと、J-Rate のもの)。
+        // J-Rate のフォルダにある、共有するものの名前のファイル (引き継ぐ前の古いもの) は使っていないので除く
         private static List<string> SettingFiles()
         {
             var list = new List<string>();
-            string dir = Path.GetDirectoryName(FilePath("x"));
-            if (!Directory.Exists(dir)) return list;
-            foreach (string f in Directory.GetFiles(dir, "comfy_*.txt"))
-                if (IsSettingFile(Path.GetFileName(f))) list.Add(f);
+            foreach (bool shared in new[] { true, false })
+            {
+                string dir = shared ? SharedDir : AppDir;
+                if (!Directory.Exists(dir)) continue;
+                foreach (string f in Directory.GetFiles(dir))
+                {
+                    string name = Path.GetFileName(f);
+                    if (IsSettingFile(name) && SharedFiles.Contains(name) == shared) list.Add(f);
+                }
+            }
             return list;
         }
 
@@ -564,14 +622,18 @@ namespace JRate
             object o;
             var files = root != null && root.TryGetValue("files", out o) ? o as Dictionary<string, object> : null;
             if (files == null || Str(root, "kind") != ExportKind)
-                throw new Exception("J-Rate の生成の設定をエクスポートしたファイルではありません。");
+                throw new Exception("生成の設定をエクスポートしたファイルではありません。");
 
             try { Export(ImportBackupPath); } catch { }
 
-            foreach (string f in SettingFiles()) File.Delete(f);
-            Directory.CreateDirectory(Path.GetDirectoryName(FilePath("x")));
+            // comfy_*.txt はすべて置き換える。エンハンサーなど、前の形式に入っていないものは入っているときだけ
+            foreach (string f in SettingFiles())
+            {
+                string name = Path.GetFileName(f);
+                if (!IsExtraSettingFile(name) || files.ContainsKey(name)) File.Delete(f);
+            }
             foreach (var kv in files)
-                if (IsSettingFile(kv.Key) && kv.Value != null) File.WriteAllText(FilePath(kv.Key), kv.Value.ToString());
+                if (IsSettingFile(kv.Key) && kv.Key != AppsFile && kv.Value != null) WriteText(FilePath(kv.Key), kv.Value.ToString());
 
             // この PC にないワークフローは書き出して、登録してあるパスを付け替える
             var moved = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -635,31 +697,238 @@ namespace JRate
             return d.TryGetValue(key, out o) && o != null ? o.ToString() : "";
         }
 
+        // ---------------- 置き場所 ----------------
+        // テストで実際の設定に触れないよう、差し替えられるようにしておく (ふだんは null)
+        internal static string AppDataOverride = null;
+
+        private static string AppData
+        {
+            get { return AppDataOverride ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData); }
+        }
+
+        public static string SharedDir { get { return Path.Combine(AppData, "GenCommon"); } }
+        public static string AppDir { get { return Path.Combine(AppData, AppName); } }
+
+        // 名前で置き場所を振り分ける (共有するものは %APPDATA%\GenCommon)
         internal static string FilePath(string name)
         {
-            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "J-Rate");
-            return Path.Combine(dir, name);
+            return Path.Combine(SharedFiles.Contains(name) ? SharedDir : AppDir, name);
         }
 
         internal static string Load(string name)
         {
-            try
-            {
-                string f = FilePath(name);
-                return File.Exists(f) ? File.ReadAllText(f).Trim() : null;
-            }
-            catch { return null; }
+            return ReadText(FilePath(name));
         }
 
         internal static void Save(string name, string value)
         {
+            try { WriteText(FilePath(name), value); }
+            catch { }
+        }
+
+        private static string ReadText(string file)
+        {
+            try { return File.Exists(file) ? File.ReadAllText(file).Trim() : null; }
+            catch { return null; }
+        }
+
+        private static readonly object WriteLock = new object();
+
+        // 別名に書いてから置き換える (書きかけで落ちても、ほかのアプリが読みかけでも壊れないように)。失敗したら例外
+        private static void WriteText(string file, string value)
+        {
+            lock (WriteLock)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(file));
+                string temp = file + "." + System.Diagnostics.Process.GetCurrentProcess().Id + ".tmp";
+                File.WriteAllText(temp, value);
+                if (File.Exists(file)) File.Replace(temp, file, null);
+                else File.Move(temp, file);
+            }
+        }
+
+        // ---------------- 共有の一覧の 1 枠だけを書く・入れ替える ----------------
+        // ほかのアプリが同時に変えていても消さないよう、ファイルを読み直してからその枠だけを変える。戻り値は書いたあとの一覧
+        public static ComfyPreset[] UpdatePreset(string file, int index, ComfyPreset preset)
+        {
+            bool conn = file == ConnectionsFile;
+            var list = conn ? Presets : Workflows;
+            list[index] = preset == null ? new ComfyPreset() : new ComfyPreset { Name = preset.Name, Value = preset.Value };
+            if (conn) Presets = list; else Workflows = list;
+            return list;
+        }
+
+        // a 番と b 番を入れ替え、すべてのアプリの使用中の番号も合わせる
+        public static ComfyPreset[] SwapPresets(string file, int a, int b)
+        {
+            bool conn = file == ConnectionsFile;
+            var list = conn ? Presets : Workflows;
+            var t = list[a]; list[a] = list[b]; list[b] = t;
+            if (conn) Presets = list; else Workflows = list;
+            SwapIndexes(file, a, b);
+            return list;
+        }
+
+        // 共有の一覧の a 番と b 番 (0 始まり) を入れ替えたとき、apps.txt にあるすべてのアプリの番号 (1 始まり) を合わせる
+        public static void SwapIndexes(string sharedFile, int a, int b)
+        {
+            string[] names;
+            if (!IndexFiles.TryGetValue(sharedFile, out names)) return;
+            var dirs = AppDirs();
+            if (!dirs.Any(d => SamePath(d, AppDir))) dirs.Add(AppDir);
+            foreach (string dir in dirs)
+                foreach (string name in names)
+                {
+                    string f = Path.Combine(dir, name);
+                    int n;
+                    if (!int.TryParse(ReadText(f), out n)) continue;
+                    if (n == a + 1) n = b + 1;
+                    else if (n == b + 1) n = a + 1;
+                    else continue;
+                    try { WriteText(f, n.ToString()); } catch { }
+                }
+        }
+
+        private static List<string> AppDirs()
+        {
+            var list = new List<string>();
+            foreach (string line in (Load(AppsFile) ?? "").Split('\n'))
+                if (line.Trim().Length > 0) list.Add(line.Trim());
+            return list;
+        }
+
+        private static bool SamePath(string a, string b)
+        {
+            try { return string.Equals(Path.GetFullPath(a).TrimEnd('\\'), Path.GetFullPath(b).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase); }
+            catch { return false; }
+        }
+
+        // ---------------- 起動したとき: 共有に移す (一度だけ) と、apps.txt に名乗る ----------------
+        // 戻り値はステータスバーで知らせる文 (何もしなければ空)。J-Rate の古いファイルは消さない
+        public static string StartShared()
+        {
+            var notes = new List<string>();
             try
             {
-                string f = FilePath(name);
-                Directory.CreateDirectory(Path.GetDirectoryName(f));
-                File.WriteAllText(f, value);
+                if (!File.Exists(Path.Combine(AppDir, MergedFile)))
+                {
+                    var differ = new List<string>();
+                    Directory.CreateDirectory(SharedDir);
+                    MergeTab(ConnectionsFile, "comfy_url.txt", PresetCount, "接続先", notes);
+                    MergeTab(WorkflowsFile, "comfy_workflow.txt", WorkflowCount, "ワークフロー", notes);
+                    string oldBase = ReadText(Path.Combine(AppDir, "comfy_base_prompt.txt"));
+                    MergeSingle("comfy_base_prompt_video.txt", oldBase, "ベースプロンプト (動画用)", notes, differ);
+                    MergeSingle("comfy_base_prompt_image.txt", oldBase, "ベースプロンプト (画像用)", notes, differ);
+                    WriteText(Path.Combine(AppDir, MergedFile), "1");
+                    if (differ.Count > 0) notes.Add(string.Join("・", differ) + "は共有のものと違うので、共有のほうを使います");
+                }
+            }
+            catch (Exception ex)
+            {
+                notes.Add("共有の設定に移せませんでした (" + ex.Message + ")。次に起動したときにもう一度試します");
+            }
+            try
+            {
+                var dirs = AppDirs();
+                if (!dirs.Any(d => SamePath(d, AppDir)))
+                {
+                    dirs.Add(AppDir);
+                    WriteText(FilePath(AppsFile), string.Concat(dirs.Select(d => d + "\r\n")));
+                }
             }
             catch { }
+            return string.Join("。", notes);
+        }
+
+        private static ComfyPreset[] ParseTab(string text, int count)
+        {
+            var list = new ComfyPreset[count];
+            for (int i = 0; i < count; i++) list[i] = new ComfyPreset();
+            foreach (string line in (text ?? "").Split('\n'))
+            {
+                string[] p = line.TrimEnd('\r').Split('\t');
+                int n;
+                if (p.Length < 3 || !int.TryParse(p[0], out n) || n < 1 || n > count) continue;
+                list[n - 1].Name = p[1].Trim();
+                list[n - 1].Value = p[2].Trim().TrimEnd('/');
+            }
+            return list;
+        }
+
+        private static string FormatTab(ComfyPreset[] list)
+        {
+            var sb = new StringBuilder();
+            for (int i = 0; i < list.Length; i++)
+                sb.Append(i + 1).Append('\t').Append(OneLine(list[i].Name)).Append('\t').Append(OneLine(list[i].Value)).Append("\r\n");
+            return sb.ToString();
+        }
+
+        // 接続先・ワークフロー: 共有になければ写し、あれば共有にないもの (URL・パスで比べる) を空いている枠に足す
+        private static void MergeTab(string file, string legacy, int count, string label, List<string> notes)
+        {
+            string mineText = ReadText(Path.Combine(AppDir, file));
+            ComfyPreset[] mine;
+            if (mineText == null)
+            {
+                string old = ReadText(Path.Combine(AppDir, legacy));
+                if (string.IsNullOrWhiteSpace(old)) return;
+                mine = ParseTab("", count);
+                mine[0].Value = old.Trim().TrimEnd('/');   // プリセットができる前の単一の設定
+            }
+            else mine = ParseTab(mineText, count);
+            if (mine.All(p => p.IsEmpty)) return;
+            string sharedFile = Path.Combine(SharedDir, file);
+            string sharedText = ReadText(sharedFile);
+            if (sharedText == null)
+            {
+                WriteText(sharedFile, FormatTab(mine));
+                notes.Add(label + "を共有に移しました");
+                return;
+            }
+            var shared = ParseTab(sharedText, count);
+            var map = new Dictionary<int, int>();
+            int added = 0, overflow = 0;
+            for (int i = 0; i < count; i++)
+            {
+                if (mine[i].IsEmpty) continue;
+                int found = Array.FindIndex(shared, p => !p.IsEmpty && string.Equals(p.Value, mine[i].Value, StringComparison.OrdinalIgnoreCase));
+                if (found < 0)
+                {
+                    found = Array.FindIndex(shared, p => p.IsEmpty);
+                    if (found < 0) { overflow++; continue; }
+                    shared[found] = mine[i];
+                    added++;
+                }
+                map[i] = found;
+            }
+            if (added > 0)
+            {
+                WriteText(sharedFile, FormatTab(shared));
+                notes.Add(label + "を " + added + " 件、共有に足しました");
+            }
+            if (overflow > 0) notes.Add(label + "は枠がいっぱいで " + overflow + " 件を共有に入れられませんでした");
+            // 使用中の番号を、移したあとの位置に付け替える
+            foreach (string name in IndexFiles[file])
+            {
+                string f = Path.Combine(AppDir, name);
+                int n, to;
+                if (int.TryParse(ReadText(f), out n) && map.TryGetValue(n - 1, out to) && to != n - 1) WriteText(f, (to + 1).ToString());
+            }
+        }
+
+        // ベースプロンプト: 共有が空のときだけ入れる。違っていれば共有を残して知らせる
+        private static void MergeSingle(string file, string legacy, string label, List<string> notes, List<string> differ)
+        {
+            string mine = ReadText(Path.Combine(AppDir, file)) ?? legacy;
+            if (string.IsNullOrEmpty(mine)) return;
+            string sharedFile = Path.Combine(SharedDir, file);
+            string shared = ReadText(sharedFile);
+            if (string.IsNullOrEmpty(shared))
+            {
+                WriteText(sharedFile, mine);
+                notes.Add(label + "を共有に移しました");
+            }
+            else if (shared.Trim() != mine.Trim()) differ.Add(label);
         }
     }
 
