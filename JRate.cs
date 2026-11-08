@@ -1410,6 +1410,13 @@ namespace JRate
             var comfySettings = new MenuItem { Header = "生成の設定..." };
             comfySettings.Click += delegate { ShowComfySettings(); };
             menu.Items.Add(comfySettings);
+            var diagramSettings = new MenuItem
+            {
+                Header = "図で設定...",
+                ToolTip = "設定・処理・送る前の確認を図のように並べた画面で、次に生成するときの設定を決めます (生成はしません)"
+            };
+            diagramSettings.Click += delegate { ShowDiagramSettings(); };
+            menu.Items.Add(diagramSettings);
             var readerSettings = new MenuItem { Header = "読み取りの設定..." };
             readerSettings.Click += delegate { ShowLlmSettings(true); };
             menu.Items.Add(readerSettings);
@@ -1493,6 +1500,42 @@ namespace JRate
             return thumbList.Items.Cast<ImageItem>().Where(x => !x.IsVideo).Select(x => x.Path).ToList();
         }
 
+        // 「図で設定」: 図の画面で、次に生成するときの設定 (前回の値) を決めて保存する。生成はしない。
+        // 表示中の画像があれば、その説明プロンプトで送る前の確認を見せる
+        private void ShowDiagramSettings()
+        {
+            var it = Current;
+            var sources = new List<string>();
+            if (it != null && !it.IsVideo) sources.Add(it.Path);
+            GenRequest prefill = null;
+            try
+            {
+                Window owner = gridWindow != null && gridWindow.IsActive ? (Window)gridWindow : this;
+                for (;;)
+                {
+                    var dlg = new ComfyPromptDialog("図で設定", sources, prefill, true, true, null);
+                    dlg.Owner = owner;
+                    if (dlg.ShowDialog() == true)
+                    {
+                        statusText.Text = "生成の設定を保存しました。次に「生成する」で開いたときに、この設定で始まります。";
+                        return;
+                    }
+                    if (dlg.Reopen == null) return;
+                    // 「生成の設定...」が押された: 設定を出してから、入力していた内容で開き直す
+                    prefill = dlg.Reopen;
+                    if (ShowComfySettings())
+                    {
+                        prefill.Url = "";
+                        prefill.WorkflowPath = "";
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "図で設定 - J-Rate", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
         // 設定を聞いてから、sources の画像をジョブに登録する。
         // prefill は欄の初期値 (null なら前回の値)
         private void Generate(List<string> sources, GenRequest prefill)
@@ -1523,12 +1566,23 @@ namespace JRate
                     ? "生成する - " + System.IO.Path.GetFileName(sources[0])
                     : "まとめて生成する - " + what + " " + sources.Count + " 枚";
                 Window owner = gridWindow != null && gridWindow.IsActive ? (Window)gridWindow : this;
+                bool diagram = true;   // 図の画面で始める (「いつもの画面で開く」で切り替える。generation-standard 4 章)
+                ComfyPromptDialog.DialogCarry carry = null;
                 for (;;)
                 {
-                    dlg = new ComfyPromptDialog(title, sources, prefill);
+                    dlg = new ComfyPromptDialog(title, sources, prefill, diagram, false, carry);
                     dlg.Owner = owner;
                     if (dlg.ShowDialog() == true) break;
                     if (dlg.Reopen == null) return;
+                    carry = null;
+                    if (dlg.SwitchView)
+                    {
+                        // いつもの画面 ⇔ 図の画面: 入力した内容のまま、もう一方で開き直す
+                        diagram = !diagram;
+                        prefill = dlg.Reopen;
+                        carry = dlg.Carry;
+                        continue;
+                    }
 
                     // 「生成の設定...」が押された : 設定を出してから、入力していた内容で開き直す。
                     // 設定を OK で閉じたときは、そこで選んだ接続先とワークフローを使う
@@ -4772,7 +4826,7 @@ namespace JRate
     // ------------------------------------------------------------------
     // 「生成する」のたびに出す、接続先・ワークフロー・プロンプト・秒数・回数の入力ダイアログ
     // ------------------------------------------------------------------
-    public class ComfyPromptDialog : Window
+    public partial class ComfyPromptDialog : Window
     {
         private const double MaxSeconds = 60;
         private const int MaxRepeat = 20;
@@ -4815,9 +4869,17 @@ namespace JRate
         // 「生成の設定...」を押して閉じたときの、各欄の内容 (呼び出し側が設定を出してから、これを初期値にして開き直す)
         public GenRequest Reopen { get; private set; }
 
-        // imageCount : 対象の画像の枚数 / prefill : 欄の初期値 (null なら前回の値)
         public ComfyPromptDialog(string title, List<string> sources, GenRequest prefill)
+            : this(title, sources, prefill, false, false, null)
         {
+        }
+
+        // prefill : 欄の初期値 (null なら前回の値)。diagram : 図の画面 (ComfyDiagram.cs) で開く。
+        // settingsOnly : 「図で設定」(生成せずに前回の値として保存)。carry : 画面を切り替えたときに持ってくる欄
+        public ComfyPromptDialog(string title, List<string> sources, GenRequest prefill,
+                                 bool diagram, bool settingsOnly, DialogCarry carry)
+        {
+            this.settingsOnly = settingsOnly;
             this.sources = sources;
             int imageCount = sources.Count;
             foreach (string s in sources) captions.Add(Reader.ReadCaption(s));
@@ -4850,8 +4912,8 @@ namespace JRate
             for (int i = 0; i < sets.Length; i++) setBox.Items.Add(sets[i].Label(i));
             // 前回選んでいたセットを選んだ状態にする。各欄には前回使った値が入るので、
             // ここではセットの内容を入れ直さない (セットを選んだあとで直した内容を残すため)
-            int lastSet = ComfySettings.LastSet;
-            if (lastSet >= 0 && !sets[lastSet].IsEmpty)
+            int lastSet = carry != null ? carry.Set : ComfySettings.LastSet;
+            if (lastSet >= 0 && lastSet < sets.Length && !sets[lastSet].IsEmpty)
             {
                 setBox.SelectedIndex = lastSet;
                 saveSet.IsEnabled = true;
@@ -4945,8 +5007,8 @@ namespace JRate
             for (int i = 0; i < prompts.Length; i++) promptPresetBox.Items.Add(prompts[i].TextLabel(i));
             // 前回選んでいたプリセットを選んだ状態にする。プロンプトの欄には前回使った内容が入るので、
             // ここではプリセットの内容を入れ直さない (選んだあとで直した内容を残すため)
-            int lastPrompt = ComfySettings.LastPromptPreset;
-            if (lastPrompt >= 0 && !prompts[lastPrompt].IsEmpty)
+            int lastPrompt = carry != null ? carry.PromptPreset : ComfySettings.LastPromptPreset;
+            if (lastPrompt >= 0 && lastPrompt < prompts.Length && !prompts[lastPrompt].IsEmpty)
             {
                 promptPresetBox.SelectedIndex = lastPrompt;
                 savePrompt.IsEnabled = true;
@@ -4994,7 +5056,7 @@ namespace JRate
             readerRow.Children.Add(readerBox);
             rereadCheck = new CheckBox
             {
-                Content = "読み取り済みでも読み直す", IsChecked = Reader.Reread, VerticalAlignment = VerticalAlignment.Center,
+                Content = "読み取り済みでも読み直す", IsChecked = carry != null ? carry.Reread : Reader.Reread, VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(8, 0, 0, 0), ToolTip = "オンにすると、説明プロンプトのある画像も読み取り直して .txt を上書きします"
             };
             readerRow.Children.Add(rereadCheck);
@@ -5054,7 +5116,7 @@ namespace JRate
             repeatRow.Children.Add(new TextBlock { Text = "回数", VerticalAlignment = VerticalAlignment.Center });
             repeatBox = new TextBox
             {
-                Text = "1",
+                Text = carry != null ? carry.Repeat : "1",
                 Width = 60,
                 Padding = new Thickness(2, 3, 2, 3),
                 Margin = new Thickness(8, 0, 6, 0),
@@ -5106,6 +5168,39 @@ namespace JRate
             left.Children.Add(settings);
             left.Children.Add(copy);
             left.Children.Add(paste);
+            // その右 : いつもの画面 ⇔ 図の画面 (入力した内容を持って閉じ、呼び出し側がもう一方で開き直す)
+            viewButton = new Button
+            {
+                Content = diagram ? "いつもの画面で開く" : "図で開く",
+                Padding = new Thickness(12, 1, 12, 1),
+                Margin = new Thickness(16, 0, 0, 0),
+                ToolTip = diagram ? "いつもの生成の画面に切り替えます (入力した内容はそのまま)"
+                                  : "設定・処理・出力を図のように並べた画面に切り替えます (入力した内容はそのまま)"
+            };
+            left.Children.Add(viewButton);
+            viewButton.Click += delegate
+            {
+                Reopen = Fields();
+                Carry = new DialogCarry
+                {
+                    Repeat = repeatBox.Text.Trim().Length > 0 ? repeatBox.Text.Trim() : "1",
+                    Set = setBox.SelectedIndex,
+                    PromptPreset = promptPresetBox.SelectedIndex,
+                    Reread = rereadCheck.IsChecked == true
+                };
+                ComfySettings.UseBasePrompt = baseCheck.IsChecked == true;
+                SwitchView = true;
+                Close();
+            };
+            if (settingsOnly)
+            {
+                // 「図で設定」: 回数・切り替え・コピー / 貼り付けは使わない
+                okButton.Content = "設定を保存";
+                okButton.ToolTip = "選んだものを、次に「生成する」で開いたときの設定として保存します (生成はしません)";
+                copy.Visibility = Visibility.Collapsed;
+                paste.Visibility = Visibility.Collapsed;
+                viewButton.Visibility = Visibility.Collapsed;
+            }
             var bottom = new DockPanel();
             DockPanel.SetDock(left, Dock.Left);
             bottom.Children.Add(left);
@@ -5275,6 +5370,8 @@ namespace JRate
                 first.Focus();
                 first.SelectAll();
             };
+
+            if (diagram) BuildDiagram(panel, setRow, destRow, wfRow, secRow, repeatRow, bottom);
         }
 
         // 接続先・ワークフロー・プロンプト・秒数を欄に入れる。接続先とワークフローは一覧に
@@ -5379,6 +5476,8 @@ namespace JRate
             bool reread = rereadCheck.IsChecked == true;
             rereadCheck.IsEnabled = reads;
             if (!reads) captionHint.Text = "";
+            else if (sources.Count == 0)
+                captionHint.Text = "＋ 説明プロンプト: 画像ごとの .txt (未読み取りのものはジョブの中で読み取ります)";
             else if (sources.Count > 1)
             {
                 int done = captions.Count(c => !string.IsNullOrWhiteSpace(c));
@@ -5389,6 +5488,7 @@ namespace JRate
                 captionHint.Text = "＋ 説明プロンプト: " + (reread ? "読み直します" : "まだ読み取っていません") + " (ジョブの中で読み取ります)";
             else captionHint.Text = "＋ 説明プロンプト: " + string.Join(" ", captions[0].Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries));
             captionHint.ToolTip = reads && sources.Count == 1 && captions[0] != null ? captions[0] : null;
+            RefreshDiagram();
             captionHint.Visibility = reads ? Visibility.Visible : Visibility.Collapsed;
 
             var notes = new List<string>();
@@ -5436,6 +5536,12 @@ namespace JRate
 
         private void Accept()
         {
+            if (reading) return;   // 図の画面の「今読み取る」の最中
+            if (settingsOnly)
+            {
+                SaveSettingsOnly();
+                return;
+            }
             if (!okButton.IsEnabled) return;   // ワークフローを読めていない (Ctrl+Enter で来たとき)
             int repeat;
             if (!int.TryParse(repeatBox.Text.Trim(), out repeat) || repeat < 1 || repeat > MaxRepeat)
@@ -5506,6 +5612,7 @@ namespace JRate
                 int sel = workflowBox.SelectedIndex;
                 if (sel < 0) throw new Exception("ワークフローが登録されていません。「生成の設定...」で登録してください。");
                 var wf = ComfyVideo.LoadWorkflow(ComfyVideo.NewSerializer(), workflowPath[sel]);
+                wfData = wf;
                 if (ComfyVideo.FindNodes(wf, "LoadImage").Count == 0)
                     throw new Exception("ワークフローに「Load Image」(LoadImage) ノードがありません。\n" + workflowPath[sel]);
                 string problem = ComfyVideo.PromptSlotProblem(wf);
@@ -5518,9 +5625,10 @@ namespace JRate
             catch (Exception ex) { error = ex.Message; }
 
             bool ok = error == null;
+            if (!ok) wfData = null;
             workflowError.Text = error ?? "";
             workflowError.Visibility = ok ? Visibility.Collapsed : Visibility.Visible;
-            okButton.IsEnabled = ok;
+            okButton.IsEnabled = (ok || settingsOnly) && !reading;   // 「図で設定」は、ワークフローを読めなくてもほかの設定を保存できる
 
             promptLabel.Text = hasPrompt || !ok ? "プロンプト (Ctrl+Enter で開始)"
                                                 : "プロンプト (このワークフローには入れる場所がありません)";
@@ -5548,6 +5656,7 @@ namespace JRate
             secondsBox.IsEnabled = hasSeconds;
             secondsUnit.Text = hasSeconds || !ok ? "秒" : "秒 (このワークフローでは変えられません)";
             secondsUnit.Foreground = hasSeconds ? Brushes.Black : Brushes.DimGray;
+            RefreshDiagram();
         }
 
         private static bool TryParseSeconds(string text, out double seconds)

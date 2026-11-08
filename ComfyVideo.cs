@@ -1368,6 +1368,27 @@ namespace JRate
             return PromptSlots(wf).Count;
         }
 
+        // プロンプトを入れる場所の説明 (図の画面の確認用)。例: ノード 6「Positive」の text
+        public static List<string> PromptSlotLabels(Dictionary<string, object> wf)
+        {
+            var labels = new List<string>();
+            foreach (var slot in PromptSlots(wf))
+            {
+                foreach (var kv in wf)
+                {
+                    var node = kv.Value as Dictionary<string, object>;
+                    if (node == null || !ReferenceEquals(Inputs(node), slot.Key)) continue;
+                    string name = Title(node);
+                    if (name.Length == 0) name = ClassType(node);
+                    var s = slot.Key[slot.Value] as string;
+                    labels.Add("ノード " + kv.Key + "「" + name + "」の " + slot.Value +
+                               (s != null && s.Contains(PromptMarker) ? " (「" + PromptMarker + "」の部分)" : ""));
+                    break;
+                }
+            }
+            return labels;
+        }
+
         public static bool HasPromptMarker(Dictionary<string, object> wf)
         {
             return MarkerSlots(wf).Count > 0;
