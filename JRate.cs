@@ -4316,6 +4316,11 @@ namespace JRate
             public readonly TextBox ValueBox;
             public readonly Button SaveButton = new Button { Content = "プリセットを保存", Padding = new Thickness(12, 2, 12, 2) };
             public readonly Button DeleteButton = new Button { Content = "削除", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0) };
+            public readonly Button BulkButton = new Button
+            {
+                Content = "まとめて削除...", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0),
+                ToolTip = "登録してあるものから選んで、まとめて未登録にします (ほかの番号は動きません)"
+            };
             public int Shown = -1;   // 欄に出しているプリセットの番号
 
             private readonly Func<ComfyPreset, int, string> label;
@@ -4371,6 +4376,7 @@ namespace JRate
                 buttons.Children.Add(down);
                 buttons.Children.Add(SaveButton);
                 buttons.Children.Add(DeleteButton);
+                buttons.Children.Add(BulkButton);
                 Panel.Children.Add(buttons);
 
                 // 番号を選ぶと、その名前と値を欄に出す (保存していない入力は捨てる)
@@ -4417,7 +4423,33 @@ namespace JRate
                 }
             }
 
-            private void Relabel()
+            // 選んだものをまとめて未登録にする。戻り値は消した番号と、消す前の値 (やめたら null)
+            public List<KeyValuePair<int, string>> BulkDelete(Window owner, string what, string note)
+            {
+                Reload();
+                Relabel();
+                var items = new List<KeyValuePair<int, string>>();
+                for (int i = 0; i < List.Length; i++)
+                    if (!List[i].IsEmpty || List[i].Name.Length > 0) items.Add(new KeyValuePair<int, string>(i, label(List[i], i)));
+                var chosen = BulkDeleteDialog.Ask(owner, what, items, note);
+                if (chosen == null) return null;
+                Reload();
+                var removed = new List<KeyValuePair<int, string>>();
+                foreach (int i in chosen)
+                {
+                    removed.Add(new KeyValuePair<int, string>(i, List[i].Value));
+                    List[i].Clear();
+                }
+                if (chosen.Contains(Shown))
+                {
+                    NameBox.Text = "";
+                    ValueBox.Text = "";
+                }
+                Saved();
+                return removed;
+            }
+
+            public void Relabel()
             {
                 relabeling = true;
                 for (int i = 0; i < List.Length; i++) Box.Items[i] = label(List[i], i);
@@ -4462,6 +4494,8 @@ namespace JRate
 
         private readonly PresetTab connection, workflow, prompt;
         private readonly TextBlock resultText;
+        private Dictionary<string, string> folders = ComfySettings.ConnectionFolders;   // 接続先ごとのワークフローのフォルダ
+        private TextBox folderBox;
 
         // インポートして閉じたとき (呼び出し側が、読み込んだ内容で開き直す)
         public bool Imported { get; private set; }
@@ -4494,9 +4528,33 @@ namespace JRate
                 "名前 (一覧に出す名前。空ならファイル名を出します)",
                 "ワークフロー (ComfyUI のメニュー「Export (API)」で保存した JSON)",
                 new TextBox { Padding = new Thickness(2, 3, 2, 3) }, browse,
-                (p, i) => p.FileLabel(i), s => s.Trim().Trim('"'), list => ComfySettings.Workflows = list,
+                WorkflowLabel, s => s.Trim().Trim('"'), list => ComfySettings.Workflows = list,
                 (a, b) => ComfySettings.SwapIndexes(ComfySettings.WorkflowsFile, a, b),
                 () => ComfySettings.Workflows);
+            // 接続先のワークフローのフォルダ (URL の欄の下、ボタンの前)。ワークフローがどの台用かを、置いてあるフォルダで見分ける
+            folderBox = new TextBox { Padding = new Thickness(2, 3, 2, 3) };
+            var folderBrowse = new Button { Content = "参照...", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0) };
+            var folderRow = new DockPanel { Margin = new Thickness(0, 4, 0, 12) };
+            DockPanel.SetDock(folderBrowse, Dock.Right);
+            folderRow.Children.Add(folderBrowse);
+            folderRow.Children.Add(folderBox);
+            int beforeButtons = connection.Panel.Children.Count - 1;
+            connection.Panel.Children.Insert(beforeButtons, new TextBlock { Text = "ワークフローのフォルダ (この接続先用のワークフロー JSON を置くフォルダ。例: \\\\RAVEN\\SharBox\\comfyui-api\\kiwi)" });
+            connection.Panel.Children.Insert(beforeButtons + 1, folderRow);
+            connection.Panel.Children.Add(new TextBlock
+            {
+                Text = "ワークフローのフォルダを決めると、そのフォルダにあるワークフローはこの接続先の台用として扱います " +
+                       "(一覧に台の名前が付き、生成の画面でワークフローを選ぶと接続先も合わせます)。" +
+                       "どの接続先のフォルダにもないワークフローは共通 (どの台でも使う) です。「プリセットを保存」か OK で保存します。",
+                TextWrapping = TextWrapping.Wrap, Foreground = Brushes.DimGray, Margin = new Thickness(0, 0, 0, 8)
+            });
+            connection.Box.SelectionChanged += delegate { ShowFolder(); };
+            folderBrowse.Click += delegate
+            {
+                var fbd = new System.Windows.Forms.FolderBrowserDialog { Description = "この接続先用のワークフローを置くフォルダ", SelectedPath = folderBox.Text.Trim().Trim('"') };
+                if (fbd.ShowDialog() == System.Windows.Forms.DialogResult.OK) folderBox.Text = fbd.SelectedPath;
+            };
+
             workflow.Panel.Children.Add(new TextBlock
             {
                 Text = "ワークフローの「Load Image」ノードの画像が、右クリックした画像に差し替わります。" +
@@ -4505,6 +4563,13 @@ namespace JRate
                 Foreground = Brushes.DimGray,
                 Margin = new Thickness(0, 0, 0, 8)
             });
+            var register = new Button
+            {
+                Content = "フォルダから登録...", Padding = new Thickness(12, 2, 12, 2), HorizontalAlignment = HorizontalAlignment.Left,
+                ToolTip = "接続先ごとのワークフローのフォルダにある JSON のうち、まだ登録していないものをまとめて登録します"
+            };
+            register.Click += delegate { RegisterFromFolders(); };
+            workflow.Panel.Children.Add(register);
 
             prompt = new PresetTab(ComfySettings.PromptPresets,
                 "プロンプトのプリセット (" + ComfySettings.PromptCount + " 件まで登録できます。「生成する」の画面で選んで使います)",
@@ -4578,6 +4643,33 @@ namespace JRate
                 HorizontalAlignment = HorizontalAlignment.Right,
                 Margin = new Thickness(0, 0, 0, 8)
             };
+            var setBulk = new Button
+            {
+                Content = "まとめて削除...", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(0, 0, 24, 0),
+                ToolTip = "登録してあるセットから選んで、まとめて未登録にします (ほかの番号は動きません)"
+            };
+            setBulk.Click += delegate
+            {
+                var fresh = ComfySettings.Sets;   // ほかで保存したものを消さないよう読み直す
+                for (int i = 0; i < sets.Length && i < fresh.Length; i++)
+                {
+                    sets[i] = fresh[i];
+                    setList.Items[i] = sets[i].Label(i);
+                }
+                var items = new List<KeyValuePair<int, string>>();
+                for (int i = 0; i < sets.Length; i++)
+                    if (!sets[i].IsEmpty) items.Add(new KeyValuePair<int, string>(i, sets[i].Label(i)));
+                var chosen = BulkDeleteDialog.Ask(this, "セット", items, "セットは J-Rate だけのものです。");
+                if (chosen == null) return;
+                foreach (int i in chosen)
+                {
+                    sets[i] = new ComfySet();
+                    setList.Items[i] = sets[i].Label(i);
+                }
+                ComfySettings.Sets = sets;
+                Result(Brushes.ForestGreen, "セットを " + chosen.Count + " 件未登録にしました");
+            };
+            setButtons.Children.Add(setBulk);
             setButtons.Children.Add(setUp);
             setButtons.Children.Add(setDown);
             setPanel.Children.Add(setButtons);
@@ -4606,7 +4698,19 @@ namespace JRate
             tabs.Items.Add(new TabItem { Header = "セット", Content = setPanel, Padding = new Thickness(12, 3, 12, 3) });
 
             var panel = new StackPanel { Margin = new Thickness(16) };
+            string offline = ComfySettings.OfflineMessage;
+            if (offline.Length > 0)   // 別の PC と共有している置き場所に繋がらない (共有するものは保存できない)
+                panel.Children.Add(new TextBlock { Text = offline, TextWrapping = TextWrapping.Wrap, Foreground = Brushes.IndianRed, Margin = new Thickness(0, 0, 0, 8) });
             panel.Children.Add(tabs);
+            panel.Children.Add(new TextBlock
+            {
+                Text = "接続先・ワークフロー・ベースプロンプト・エンハンサー・読み取りプリセット・LLM の接続は PromptWordCrafter・ImageMimicArt と共有しています。" +
+                       "置き場所: " + (ComfySettings.Location ?? ComfySettings.LocalDir + " (この PC だけ)") +
+                       "。置き場所は PromptWordCrafter か ImageMimicArt の「生成の設定」→「共有の置き場所...」で変えます (この PC のすべてのアプリに効きます)。",
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = Brushes.DimGray,
+                Margin = new Thickness(0, 0, 0, 8)
+            });
 
             var inheritRating = new CheckBox
             {
@@ -4680,13 +4784,16 @@ namespace JRate
             };
 
             connection.Box.SelectedIndex = ComfySettings.ActivePreset;
+            ShowFolder();
             workflow.Box.SelectedIndex = ComfySettings.ActiveWorkflow;
             prompt.Box.SelectedIndex = 0;
 
             connection.SaveButton.Click += delegate
             {
+                string oldUrl = connection.List[connection.Shown].Value;
                 connection.Store();
                 Saved(connection, "接続先");
+                SaveFolder(oldUrl);
             };
             workflow.SaveButton.Click += delegate
             {
@@ -4701,7 +4808,36 @@ namespace JRate
                 prompt.Store();
                 Saved(prompt, "プロンプト");
             };
-            connection.DeleteButton.Click += delegate { DeletePreset(connection, "接続先"); };
+            connection.DeleteButton.Click += delegate
+            {
+                string oldUrl = connection.List[connection.Shown].Value;
+                DeletePreset(connection, "接続先");
+                if (connection.List[connection.Shown].IsEmpty)
+                {
+                    folderBox.Text = "";
+                    SaveFolder(oldUrl);
+                }
+            };
+            connection.BulkButton.Click += delegate
+            {
+                var removed = connection.BulkDelete(this, "接続先", "接続先は 3 つのアプリで共有しています。消した接続先のワークフローのフォルダも消します。");
+                if (removed == null) return;
+                ComfySettings.RemoveUnusedFolders(removed.Select(kv => kv.Value));
+                folders = ComfySettings.ConnectionFolders;
+                ShowFolder();
+                workflow.Relabel();
+                Result(Brushes.ForestGreen, "接続先を " + removed.Count + " 件未登録にしました");
+            };
+            workflow.BulkButton.Click += delegate
+            {
+                var removed = workflow.BulkDelete(this, "ワークフロー", "ワークフローは 3 つのアプリで共有しています。JSON のファイルは消しません。");
+                if (removed != null) Result(Brushes.ForestGreen, "ワークフローを " + removed.Count + " 件未登録にしました (JSON のファイルはそのままです)");
+            };
+            prompt.BulkButton.Click += delegate
+            {
+                var removed = prompt.BulkDelete(this, "プロンプト", "");
+                if (removed != null) Result(Brushes.ForestGreen, "プロンプトを " + removed.Count + " 件未登録にしました");
+            };
             workflow.DeleteButton.Click += delegate { DeletePreset(workflow, "ワークフロー"); };
             prompt.DeleteButton.Click += delegate { DeletePreset(prompt, "プロンプト"); };
 
@@ -4756,7 +4892,9 @@ namespace JRate
                     tabs.SelectedIndex = 1;
                     return;
                 }
+                string oldUrl = connection.List[connection.Shown].Value;
                 connection.Store();
+                SaveFolder(oldUrl);
                 workflow.Store();
                 prompt.Store();
                 ComfySettings.BasePromptVideo = baseVideo.Text;
@@ -4773,6 +4911,69 @@ namespace JRate
         {
             resultText.Foreground = color;
             resultText.Text = text;
+        }
+
+        // ---------------- 接続先ごとのワークフローのフォルダ ----------------
+        // ワークフローの一覧の文字 (台の名前を付ける)
+        private string WorkflowLabel(ComfyPreset p, int i)
+        {
+            string text = p.FileLabel(i);
+            if (p.IsEmpty) return text;
+            string machine = ComfySettings.MachineName(p.Value, connection != null ? connection.List : ComfySettings.Presets, folders);
+            string name = p.Name;
+            if (name.Length == 0) { try { name = System.IO.Path.GetFileName(p.Value); } catch { } }
+            return text + ComfySettings.MachineTag(name, machine);
+        }
+
+        private void ShowFolder()
+        {
+            int i = connection.Shown;
+            string url = i >= 0 && i < connection.List.Length ? connection.List[i].Value : "";
+            string folder;
+            folderBox.Text = url.Length > 0 && folders.TryGetValue(ComfySettings.UrlKey(url), out folder) ? folder : "";
+        }
+
+        // 接続先を保存したあと、そのワークフローのフォルダも書き、ワークフローの一覧の台の名前を付け直す
+        private void SaveFolder(string oldUrl)
+        {
+            ComfySettings.SetConnectionFolder(connection.List[connection.Shown].Value, folderBox.Text, oldUrl);
+            folders = ComfySettings.ConnectionFolders;
+            workflow.Relabel();
+        }
+
+        private void RegisterFromFolders()
+        {
+            var list = new List<KeyValuePair<string, string>>();   // (台の名前, フォルダ)。同じフォルダは 1 回
+            foreach (var p in connection.List)
+            {
+                string folder;
+                if (p.IsEmpty || !folders.TryGetValue(ComfySettings.UrlKey(p.Value), out folder)) continue;
+                if (list.Any(kv => ComfySettings.FolderKey(kv.Value) == ComfySettings.FolderKey(folder))) continue;
+                string name = p.Name;
+                if (name.Length == 0) { try { name = System.IO.Path.GetFileName(folder.TrimEnd('\\', '/')); } catch { } }
+                list.Add(new KeyValuePair<string, string>(name, folder));
+            }
+            if (list.Count == 0)
+            {
+                MessageBox.Show(this, "接続先ごとのワークフローのフォルダが決まっていません。\n\n" +
+                                      "「接続先」のタブで接続先を選び、「ワークフローのフォルダ」を入れて保存してください。",
+                                Title, MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            var dlg = new RegisterWorkflowsDialog(list) { Owner = this };
+            if (dlg.ShowDialog() != true || dlg.Selected == null || dlg.Selected.Count == 0) return;
+            int added = ComfySettings.RegisterWorkflows(dlg.Selected);
+            var fresh = ComfySettings.Workflows;
+            for (int i = 0; i < workflow.List.Length && i < fresh.Length; i++)
+            {
+                workflow.List[i].Name = fresh[i].Name;
+                workflow.List[i].Value = fresh[i].Value;
+            }
+            workflow.Relabel();
+            int rest = dlg.Selected.Count - added;
+            Result(rest > 0 ? Brushes.Firebrick : Brushes.ForestGreen,
+                   "ワークフローを " + added + " 件登録しました (名前はファイル名です。あとで変えられます)" +
+                   (rest > 0 ? "。枠が足りず " + rest + " 件は登録できませんでした" : ""));
         }
 
         private void Saved(PresetTab tab, string what)
@@ -4838,6 +5039,11 @@ namespace JRate
         private readonly List<int> workflowIndex = new List<int>();
         private readonly List<string> workflowPath = new List<string>();
         private readonly List<string> workflowName = new List<string>();
+        private readonly ComfyPreset[] allConns;                    // 接続先の登録 (ワークフローの台を見分ける)
+        private readonly Dictionary<string, string> wfFolders;      // 接続先ごとのワークフローのフォルダ
+        private readonly TextBlock machineHint;                     // ワークフローと接続先の台が違うとき
+        private bool applyingFields;                                // セット・前回の値・貼り付けで欄を入れている間 (接続先を合わせない)
+        private ComfySet[] setList;                                 // セット (図の画面のカード)
         private readonly TextBox promptBox, secondsBox, repeatBox;
         private readonly TextBlock workflowError, promptLabel, secondsUnit, baseHint;
         private readonly CheckBox baseCheck;   // 外すとベースプロンプトを付けずに送る (前回の状態を覚える)
@@ -4894,6 +5100,7 @@ namespace JRate
 
             // セット (接続先・ワークフロー・プロンプト・秒数をまとめて呼び出す)
             var sets = ComfySettings.Sets;
+            setList = sets;
             var setRow = new DockPanel { Margin = new Thickness(0, 0, 0, 12) };
             setRow.Children.Add(new TextBlock
             {
@@ -4957,6 +5164,8 @@ namespace JRate
             // ワークフロー (同じく登録してあるプリセットから選ぶ)
             var workflows = ComfySettings.Workflows;
             int activeWorkflow = ComfySettings.ActiveWorkflow;
+            allConns = presets;
+            wfFolders = ComfySettings.ConnectionFolders;
             var wfRow = new DockPanel { Margin = new Thickness(0, 0, 0, 12) };
             wfRow.Children.Add(new TextBlock
             {
@@ -4968,10 +5177,13 @@ namespace JRate
             for (int i = 0; i < workflows.Length; i++)
             {
                 if (workflows[i].IsEmpty) continue;
-                workflowBox.Items.Add(workflows[i].FileLabel(i));
+                string wfName = workflows[i].Name.Length > 0 ? workflows[i].Name : System.IO.Path.GetFileName(workflows[i].Value);
+                // どの台用か (置いてあるフォルダで見分ける) を名前の後ろに出す
+                workflowBox.Items.Add(workflows[i].FileLabel(i) +
+                                      ComfySettings.MachineTag(wfName, ComfySettings.MachineName(workflows[i].Value, allConns, wfFolders)));
                 workflowIndex.Add(i);
                 workflowPath.Add(workflows[i].Value);
-                workflowName.Add(workflows[i].Name.Length > 0 ? workflows[i].Name : System.IO.Path.GetFileName(workflows[i].Value));
+                workflowName.Add(wfName);
                 if (i == activeWorkflow) workflowBox.SelectedIndex = workflowBox.Items.Count - 1;
             }
             if (workflowBox.SelectedIndex < 0 && workflowBox.Items.Count > 0) workflowBox.SelectedIndex = 0;
@@ -4987,6 +5199,15 @@ namespace JRate
                 Visibility = Visibility.Collapsed
             };
             panel.Children.Add(workflowError);
+            machineHint = new TextBlock
+            {
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = Brushes.DarkOrange,
+                Margin = new Thickness(0, -4, 0, 12),
+                Visibility = Visibility.Collapsed,
+                ToolTip = "ワークフローがどの台用かは、接続先ごとに決めたワークフローのフォルダで見分けています"
+            };
+            panel.Children.Add(machineHint);
 
             // プロンプトのプリセット (選ぶとプロンプトの欄に入る。「保存」で今の欄の内容を登録)
             var prompts = ComfySettings.PromptPresets;
@@ -5221,6 +5442,14 @@ namespace JRate
             // プロンプトと秒数を入れられるかどうかはワークフローで決まる
             ApplyWorkflow();
             workflowBox.SelectionChanged += delegate { ApplyWorkflow(); };
+            // ワークフローを (人が) 選んだら、その台の接続先にする。セットや前回の値で選んだときは変えない
+            workflowBox.SelectionChanged += delegate
+            {
+                if (!applyingFields) MatchConnection();
+                UpdateMachineHint();
+            };
+            presetBox.SelectionChanged += delegate { UpdateMachineHint(); };
+            UpdateMachineHint();
 
             // プリセットを選ぶと、登録してある内容がプロンプトの欄に入る (未登録の番号なら欄はそのまま)
             bool relabeling = false;
@@ -5381,10 +5610,40 @@ namespace JRate
             int i = presetUrl.FindIndex(u => string.Equals(u, url, StringComparison.OrdinalIgnoreCase));
             if (i >= 0) presetBox.SelectedIndex = i;
             i = workflowPath.FindIndex(p => string.Equals(p, workflow, StringComparison.OrdinalIgnoreCase));
-            if (i >= 0) workflowBox.SelectedIndex = i;   // 欄の有効・無効は ApplyWorkflow が切り替える
+            applyingFields = true;   // セットなどの組み合わせのまま (接続先を合わせない)
+            try { if (i >= 0) workflowBox.SelectedIndex = i; }   // 欄の有効・無効は ApplyWorkflow が切り替える
+            finally { applyingFields = false; }
             if (prompt != null && promptBox.IsEnabled) promptBox.Text = prompt;
             double sec;
             if (secondsBox.IsEnabled && TryParseSeconds(seconds, out sec)) secondsBox.Text = seconds.Trim();
+        }
+
+        // ---------------- ワークフローの台と接続先 ----------------
+        // ワークフローがある台用なら、接続先をその台にする (今の接続先がその台ならそのまま)
+        private void MatchConnection()
+        {
+            int wf = workflowBox.SelectedIndex;
+            if (wf < 0 || wf >= workflowPath.Count) return;
+            var urls = new HashSet<string>(ComfySettings.WorkflowMachines(workflowPath[wf], allConns, wfFolders)
+                                                        .Select(c => ComfySettings.UrlKey(c.Value)));
+            int cur = presetBox.SelectedIndex;
+            if (urls.Count == 0 || (cur >= 0 && cur < presetUrl.Count && urls.Contains(ComfySettings.UrlKey(presetUrl[cur])))) return;
+            int i = presetUrl.FindIndex(u => urls.Contains(ComfySettings.UrlKey(u)));
+            if (i >= 0) presetBox.SelectedIndex = i;
+        }
+
+        private string MachineConflict(string url, string path)
+        {
+            return ComfySettings.MachineConflict(url, path, allConns, wfFolders);
+        }
+
+        private void UpdateMachineHint()
+        {
+            int wf = workflowBox.SelectedIndex, conn = presetBox.SelectedIndex;
+            string machine = wf >= 0 && wf < workflowPath.Count && conn >= 0 && conn < presetUrl.Count
+                           ? MachineConflict(presetUrl[conn], workflowPath[wf]) : "";
+            machineHint.Text = machine.Length > 0 ? "⚠ このワークフローは " + machine + " 用です。接続先の台と違います" : "";
+            machineHint.Visibility = machine.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         }
 
         // 今の各欄の内容 (プロンプトと長さは、欄を使えないときや長さが正しくないときは null)

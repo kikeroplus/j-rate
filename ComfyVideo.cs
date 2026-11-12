@@ -30,11 +30,14 @@ namespace JRate
             return Label(index, Value);
         }
 
-        // ワークフロー用 : パスの代わりにファイル名を出す
+        // ワークフロー用 : パスの代わりにファイル名を出す (名前がファイル名 (拡張子なし) と同じなら出さない)
         public string FileLabel(int index)
         {
             string file = Value;
             try { file = Path.GetFileName(Value); } catch { }
+            string stem = file;
+            try { stem = Path.GetFileNameWithoutExtension(file); } catch { }
+            if (Name.Length > 0 && Name == stem) file = "";
             return Label(index, file);
         }
 
@@ -311,9 +314,11 @@ namespace JRate
     // 設定。接続先・ワークフロー・ベースプロンプト・エンハンサー・読み取りプリセット・LLM の接続は
     // J-Rate・PromptWordCrafter・ImageMimicArt で共有する (%APPDATA%\GenCommon)。
     // それ以外 (使用中の番号・前回の値・セット・記録) は %APPDATA%\J-Rate (generation-standard 8・11 章)。
-    // ファイルの名前はどちらも同じなので、FilePath が名前で置き場所を振り分ける
+    // ファイルの名前はどちらも同じなので、FilePath が名前で置き場所を振り分ける。
+    // %APPDATA%\GenCommon\shared_dir.txt にフォルダが書いてあれば、共有するものはそこを読み書きし、
+    // %APPDATA%\GenCommon は最後に読めた内容の写しになる (繋がらないときは写しを読むだけ。11 章「別の PC と共有する」)
     // ------------------------------------------------------------------
-    public static class ComfySettings
+    public static partial class ComfySettings
     {
         public const string DefaultUrl = "http://127.0.0.1:8188";
         public const string AppName = "J-Rate";
@@ -321,13 +326,16 @@ namespace JRate
         public const string WorkflowsFile = "comfy_workflows.txt";
         public const string EnhancerFile = "enhancer_presets.json";
         public const string ReaderFile = "reader_presets.json";
-        private const string AppsFile = "apps.txt";
+        private const string AppsFile = "apps.txt";                 // この PC の %APPDATA%\GenCommon に置く (共有しない)
+        private const string LocationFile = "shared_dir.txt";       // 共有の置き場所 (この PC の %APPDATA%\GenCommon に置く)
+        private const string SelectedFile = "selected_keys.txt";    // 番号のファイルが指している項目 (1 行に「ファイル名 Tab 項目」)
         private const string MergedFile = "gencommon_merged.txt";   // J-Rate の設定を共有に移した印
         private static readonly string[] LlmFiles = { "llm_url.txt", "reader_model.txt", "enhance_model.txt", "reader_max_side.txt" };
         private static readonly HashSet<string> SharedFiles = new HashSet<string>(new[]
         {
             ConnectionsFile, WorkflowsFile, "comfy_base_prompt_video.txt", "comfy_base_prompt_image.txt",
-            EnhancerFile, ReaderFile, AppsFile, "llm_url.txt", "reader_model.txt", "enhance_model.txt", "reader_max_side.txt"
+            EnhancerFile, ReaderFile, "llm_url.txt", "reader_model.txt", "enhance_model.txt", "reader_max_side.txt",
+            "comfy_connection_folders.txt"   // 接続先ごとのワークフローのフォルダ (PromptWordCrafter・ImageMimicArt が使う。J-Rate はまだ使わない)
         });
         // 共有の一覧を指す、アプリごとの番号のファイル (上へ / 下へで入れ替えたとき、すべてのアプリで直す)
         private static readonly Dictionary<string, string[]> IndexFiles = new Dictionary<string, string[]>
@@ -618,7 +626,7 @@ namespace JRate
             var list = new List<string>();
             foreach (bool shared in new[] { true, false })
             {
-                string dir = shared ? SharedDir : AppDir;
+                string dir = shared ? ActiveSharedDir : AppDir;
                 if (!Directory.Exists(dir)) continue;
                 foreach (string f in Directory.GetFiles(dir))
                 {
@@ -678,6 +686,7 @@ namespace JRate
             var files = root != null && root.TryGetValue("files", out o) ? o as Dictionary<string, object> : null;
             if (files == null || Str(root, "kind") != ExportKind)
                 throw new Exception("生成の設定をエクスポートしたファイルではありません。");
+            if (!Online) throw new Exception(OfflineMessage);
 
             try { Export(ImportBackupPath); } catch { }
 
@@ -761,24 +770,252 @@ namespace JRate
             get { return AppDataOverride ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData); }
         }
 
-        public static string SharedDir { get { return Path.Combine(AppData, "GenCommon"); } }
+        // この PC の %APPDATA%\GenCommon (apps.txt と shared_dir.txt。共有が別の場所のときは写し)
+        public static string LocalDir { get { return Path.Combine(AppData, "GenCommon"); } }
         public static string AppDir { get { return Path.Combine(AppData, AppName); } }
 
-        // 名前で置き場所を振り分ける (共有するものは %APPDATA%\GenCommon)
+        // shared_dir.txt に書いてある共有の置き場所 (なければ null = この PC の %APPDATA%\GenCommon)
+        public static string Location
+        {
+            get { RefreshLocation(); return remoteDir; }
+        }
+
+        // 共有するものを読み書きする場所 (別の場所のときはそのフォルダ)
+        public static string SharedDir
+        {
+            get { RefreshLocation(); return remoteDir ?? LocalDir; }
+        }
+
+        // いま共有するものを読む場所 (別の場所に繋がらないときは、この PC の写し)
+        private static string ActiveSharedDir
+        {
+            get { return Online ? SharedDir : LocalDir; }
+        }
+
+        private static string remoteDir;
+        private static string locationKey = "?";   // shared_dir.txt を前に読んだときの場所と更新時刻
+        private static bool? online;
+        private static DateTime onlineChecked;
+
+        // shared_dir.txt が変わっていれば読み直す (PromptWordCrafter などで場所を変えても、再起動せずに効くように)
+        private static void RefreshLocation()
+        {
+            string pointer = Path.Combine(LocalDir, LocationFile);
+            string key;
+            try { key = pointer + "|" + (File.Exists(pointer) ? File.GetLastWriteTimeUtc(pointer).Ticks.ToString() : "-"); }
+            catch { key = pointer + "|-"; }
+            if (key == locationKey) return;
+            locationKey = key;
+            string text = (ReadText(pointer) ?? "").Trim().Trim('"');
+            remoteDir = text.Length > 0 && !SamePath(text, LocalDir) ? text : null;
+            online = null;
+        }
+
+        // 共有の置き場所を読めるか (この PC の中なら、いつも true)。繋がらないフォルダは見るたびに待たされるので、間を空けて確かめる
+        public static bool Online
+        {
+            get
+            {
+                RefreshLocation();
+                if (remoteDir == null) return true;
+                double wait = online == true ? 10 : 30;
+                if (online == null || (DateTime.UtcNow - onlineChecked).TotalSeconds >= wait)
+                {
+                    bool ok;
+                    try { ok = Directory.Exists(remoteDir); } catch { ok = false; }
+                    online = ok;
+                    onlineChecked = DateTime.UtcNow;
+                }
+                return online == true;
+            }
+        }
+
+        private static void SetOffline()
+        {
+            online = false;
+            onlineChecked = DateTime.UtcNow;
+        }
+
+        // 共有の置き場所に繋がらないときに画面に出す文 (繋がっていれば空)
+        public static string OfflineMessage
+        {
+            get
+            {
+                if (Online) return "";
+                return "共有の設定の置き場所 (" + remoteDir + ") に繋がりません。この PC に残っている写しを表示しています。" +
+                       "繋がるまで、接続先・ワークフロー・ベースプロンプト・エンハンサー・読み取りプリセット・LLM の接続の変更は保存されません。";
+            }
+        }
+
+        // 名前で置き場所を振り分ける (共有するものは %APPDATA%\GenCommon か shared_dir.txt の場所)
         internal static string FilePath(string name)
         {
-            return Path.Combine(SharedFiles.Contains(name) ? SharedDir : AppDir, name);
+            if (name == AppsFile || name == LocationFile) return Path.Combine(LocalDir, name);
+            return Path.Combine(SharedFiles.Contains(name) ? ActiveSharedDir : AppDir, name);
         }
 
         internal static string Load(string name)
         {
-            return ReadText(FilePath(name));
+            if (SharedFiles.Contains(name) && Location != null)
+                return Online ? LoadRemote(name) : ReadText(Path.Combine(LocalDir, name));
+            string text = ReadText(FilePath(name));
+            if (SharedOfIndex(name) != null) text = ResolveIndex(name, text);
+            return text;
         }
 
+        // 書く。共有の置き場所に繋がらないときは、共有するものは書かない (OfflineMessage で知らせる)
         internal static void Save(string name, string value)
         {
+            if (SharedFiles.Contains(name) && Location != null)
+            {
+                if (!Online) return;
+                try { WriteText(Path.Combine(remoteDir, name), value); }
+                catch
+                {
+                    if (!Directory.Exists(remoteDir)) SetOffline();
+                    return;
+                }
+                try { WriteText(Path.Combine(LocalDir, name), value); } catch { }
+                return;
+            }
             try { WriteText(FilePath(name), value); }
             catch { }
+            string shared = SharedOfIndex(name);
+            if (shared != null) RememberKey(name, KeyAt(ItemKeys(shared), value), AppDir);
+        }
+
+        // 別の場所の共有を読み、この PC の写しも合わせる。読めなければ写しを読む
+        private static string LoadRemote(string name)
+        {
+            string mirror = Path.Combine(LocalDir, name);
+            string raw;
+            try
+            {
+                string f = Path.Combine(remoteDir, name);
+                raw = File.Exists(f) ? File.ReadAllText(f) : null;
+            }
+            catch
+            {
+                if (!Directory.Exists(remoteDir)) SetOffline();
+                return ReadText(mirror);
+            }
+            try
+            {
+                string current = File.Exists(mirror) ? File.ReadAllText(mirror) : null;
+                if (raw == null) { if (current != null) File.Delete(mirror); }
+                else if (raw != current) WriteText(mirror, raw);
+            }
+            catch { }
+            return raw == null ? null : raw.Trim();
+        }
+
+        // ---------------- 使用中・前回の番号を、指している項目でも覚えておく (別の PC で並べ替えられてもずれないように) ----------------
+        private static string SharedOfIndex(string indexFile)
+        {
+            foreach (var kv in IndexFiles)
+                if (Array.IndexOf(kv.Value, indexFile) >= 0) return kv.Key;
+            return null;
+        }
+
+        private static string KeyText(object value)
+        {
+            return string.Join(" ", (value == null ? "" : value.ToString()).Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries));
+        }
+
+        // 共有の一覧の項目を見分ける文字列 (空の枠は "")。接続先・ワークフローは URL・パス (小文字)、プリセットは名前
+        private static List<string> ItemKeys(string sharedFile)
+        {
+            var keys = new List<string>();
+            string text = Load(sharedFile);
+            if (sharedFile == ConnectionsFile || sharedFile == WorkflowsFile)
+            {
+                foreach (var p in ParseTab(text, sharedFile == ConnectionsFile ? PresetCount : WorkflowCount))
+                    keys.Add(KeyText(p.Value).ToLowerInvariant());
+                return keys;
+            }
+            object[] items = null;
+            try { items = string.IsNullOrEmpty(text) ? null : ComfyVideo.NewSerializer().DeserializeObject(text) as object[]; }
+            catch { }
+            foreach (object item in items ?? new object[0])
+            {
+                var d = item as Dictionary<string, object>;
+                if (d == null) { keys.Add(""); continue; }
+                object o;
+                string name = KeyText(d.TryGetValue("name", out o) ? o : null);
+                string system = KeyText(d.TryGetValue("system", out o) ? o : null);
+                if (system.Length > 200) system = system.Substring(0, 200);
+                keys.Add(name.Length > 0 ? name : system.Length > 0 ? "system:" + system : "");
+            }
+            return keys;
+        }
+
+        private static Dictionary<string, string> SelectedKeys(string folder)
+        {
+            var keys = new Dictionary<string, string>();
+            foreach (string line in (ReadText(Path.Combine(folder, SelectedFile)) ?? "").Split('\n'))
+            {
+                int tab = line.IndexOf('\t');
+                if (tab <= 0) continue;
+                keys[line.Substring(0, tab).Trim()] = line.Substring(tab + 1).Trim();
+            }
+            return keys;
+        }
+
+        private static void RememberKey(string indexFile, string key, string folder)
+        {
+            var keys = SelectedKeys(folder);
+            string old;
+            if (keys.TryGetValue(indexFile, out old) ? old == key : key.Length == 0) return;
+            if (key.Length > 0) keys[indexFile] = key; else keys.Remove(indexFile);
+            var sb = new StringBuilder();
+            foreach (var k in keys.Keys.OrderBy(k => k, StringComparer.Ordinal)) sb.Append(k).Append('\t').Append(keys[k]).Append("\r\n");
+            try { WriteText(Path.Combine(folder, SelectedFile), sb.ToString()); } catch { }
+        }
+
+        private static string KeyAt(List<string> keys, string text)
+        {
+            int n;
+            return int.TryParse(text, out n) && n >= 1 && n <= keys.Count ? keys[n - 1] : "";
+        }
+
+        // 番号のファイルの値を、覚えている項目の今の位置に合わせる (合わせたら書き直す)
+        private static string ResolveIndex(string indexFile, string text)
+        {
+            int n;
+            if (!int.TryParse(text, out n) || n < 1) return text;
+            var keys = ItemKeys(SharedOfIndex(indexFile));
+            string current = n <= keys.Count ? keys[n - 1] : "";
+            string stored;
+            SelectedKeys(AppDir).TryGetValue(indexFile, out stored);
+            if (!string.IsNullOrEmpty(stored) && stored != current)
+            {
+                int found = keys.IndexOf(stored);
+                if (found >= 0)
+                {
+                    try { WriteText(Path.Combine(AppDir, indexFile), (found + 1).ToString()); } catch { }
+                    return (found + 1).ToString();
+                }
+            }
+            // 覚えていない / 覚えている項目がなくなった (書き換えられた) ときは、今の位置の項目を覚える
+            if (current.Length > 0 && stored != current) RememberKey(indexFile, current, AppDir);
+            return text;
+        }
+
+        // 番号が指している項目を、まだ覚えていなければ覚える (起動したとき。ほかの PC で並べ替えられる前に)
+        private static void RememberAll()
+        {
+            var known = SelectedKeys(AppDir);
+            foreach (var kv in IndexFiles)
+            {
+                List<string> keys = null;
+                foreach (string indexFile in kv.Value)
+                {
+                    if (known.ContainsKey(indexFile)) continue;
+                    if (keys == null) keys = ItemKeys(kv.Key);
+                    string key = KeyAt(keys, ReadText(Path.Combine(AppDir, indexFile)));
+                    if (key.Length > 0) RememberKey(indexFile, key, AppDir);
+                }
+            }
         }
 
         private static string ReadText(string file)
@@ -795,7 +1032,8 @@ namespace JRate
             lock (WriteLock)
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(file));
-                string temp = file + "." + System.Diagnostics.Process.GetCurrentProcess().Id + ".tmp";
+                // 共有の置き場所は別の PC からも書くので、PC の名前も付けて別名がぶつからないようにする
+                string temp = file + "." + Environment.MachineName + "." + System.Diagnostics.Process.GetCurrentProcess().Id + ".tmp";
                 File.WriteAllText(temp, value);
                 if (File.Exists(file)) File.Replace(temp, file, null);
                 else File.Move(temp, file);
@@ -865,7 +1103,7 @@ namespace JRate
             var notes = new List<string>();
             try
             {
-                if (!File.Exists(Path.Combine(AppDir, MergedFile)))
+                if (!File.Exists(Path.Combine(AppDir, MergedFile)) && Online)   // 繋がらないときは次に起動したときに試す
                 {
                     var differ = new List<string>();
                     Directory.CreateDirectory(SharedDir);
@@ -892,6 +1130,8 @@ namespace JRate
                 }
             }
             catch { }
+            RememberAll();
+            if (!Online) notes.Add("共有の設定の置き場所 (" + remoteDir + ") に繋がりません。この PC の写しを使います");
             return string.Join("。", notes);
         }
 

@@ -612,6 +612,9 @@ namespace JRate
             this.load = load;
             Presets = load();
             Children.Add(new TextBlock { Text = caption });
+            string offline = ComfySettings.OfflineMessage;
+            if (offline.Length > 0)   // 別の PC と共有している置き場所に繋がらない (保存できない)
+                Children.Add(new TextBlock { Text = offline, TextWrapping = TextWrapping.Wrap, Foreground = Brushes.IndianRed, Margin = new Thickness(0, 2, 0, 4) });
             for (int i = 0; i < Presets.Length; i++) box.Items.Add(Presets[i].Label(i));
             Children.Add(box);
             var row = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
@@ -635,10 +638,17 @@ namespace JRate
             var down = MoveButton("▼ 下へ", 1);
             var save = new Button { Content = "プリセットを保存", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(24, 0, 0, 0) };
             var del = new Button { Content = "削除", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0) };
+            var bulk = new Button
+            {
+                Content = "まとめて削除...", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0),
+                ToolTip = "登録してあるプリセットから選んで、まとめて未登録にします (ほかの番号は動きません)"
+            };
+            bulk.Click += delegate { BulkDelete(); };
             buttons.Children.Add(up);
             buttons.Children.Add(down);
             buttons.Children.Add(save);
             buttons.Children.Add(del);
+            buttons.Children.Add(bulk);
             Children.Add(buttons);
 
             box.SelectionChanged += delegate
@@ -707,6 +717,22 @@ namespace JRate
             var edited = Edited();
             Reload();
             Presets[Shown] = edited;
+            Saved();
+        }
+
+        // 選んだものをまとめて未登録にする (ほかの番号は動かさない)
+        private void BulkDelete()
+        {
+            Reload();
+            Saved();
+            var items = new List<KeyValuePair<int, string>>();
+            for (int i = 0; i < Presets.Length; i++)
+                if (!Presets[i].IsEmpty) items.Add(new KeyValuePair<int, string>(i, Presets[i].Label(i)));
+            var chosen = BulkDeleteDialog.Ask(Window.GetWindow(this), "プリセット", items, "プリセットは 3 つのアプリで共有しています。");
+            if (chosen == null) return;
+            Reload();
+            foreach (int i in chosen) Presets[i] = new LlmPreset { Template = defaultTemplate };
+            ShowPreset(Presets[Shown]);
             Saved();
         }
 

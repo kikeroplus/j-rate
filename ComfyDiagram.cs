@@ -122,12 +122,37 @@ namespace JRate
             captionHint.Margin = new Thickness(0, 4, 0, 0);
             llmNote.Margin = new Thickness(0, 4, 0, 0);
             workflowError.Margin = new Thickness(0, 0, 0, 8);
+            machineHint.Margin = new Thickness(0, 4, 0, 0);
             promptBox.Margin = new Thickness(0, 4, 0, 4);
             secRow.Margin = new Thickness(0, 4, 0, 0);
             repeatRow.Margin = new Thickness(0, 4, 0, 0);
             destRow.Margin = new Thickness(0);
             wfRow.Margin = new Thickness(0);
             promptRow.Margin = new Thickness(0, 0, 0, 6);
+
+            // セット: 中身の概要が見えるカードを横に並べる (選んでいる番号は setBox が持つ。setBox は画面に出さない)
+            var setButtons = setRow.Children.OfType<Button>().ToList();   // 削除・保存
+            var setLabel = setRow.Children.OfType<TextBlock>().FirstOrDefault();
+            setRow.Children.Clear();
+            if (setLabel != null)
+            {
+                setLabel.FontWeight = FontWeights.Bold;
+                setLabel.VerticalAlignment = VerticalAlignment.Top;
+                DockPanel.SetDock(setLabel, Dock.Left);
+                setRow.Children.Add(setLabel);
+            }
+            var setSide = new StackPanel { VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(8, 0, 0, 0) };
+            foreach (var b in setButtons.AsEnumerable().Reverse())   // 保存、削除の順に縦に並べる
+            {
+                b.Margin = new Thickness(0, 0, 0, 6);
+                setSide.Children.Add(b);
+            }
+            DockPanel.SetDock(setSide, Dock.Right);
+            setRow.Children.Add(setSide);
+            setStrip = new SetCardStrip(n => setBox.SelectedIndex = n);
+            setRow.Children.Add(setStrip);
+            setBox.SelectionChanged += delegate { RefreshSetCards(); };
+            RefreshSetCards();
 
             var root = new DockPanel { Margin = new Thickness(16) };
             DockPanel.SetDock(setRow, Dock.Top);
@@ -156,7 +181,7 @@ namespace JRate
                                               Hint("「" + Reader.CaptionMark + "」と書くと、そこに説明プロンプトが入ります (なければ説明のあとに改行して続けます)"))),
                 Tuple.Create("enhance", "エンハンサーで盛る", true, (UIElement)Group("エンハンサー (共有)", enhancerRow, llmNote)),
                 Tuple.Create("base", "ベースプロンプトを付ける", true, (UIElement)Group("ベースプロンプト (共有)", baseCheck, noBaseHint)),
-                Tuple.Create("workflow", "ワークフローに入れる", false, (UIElement)Group("ワークフロー (共有)", wfRow, secRow)),
+                Tuple.Create("workflow", "ワークフローに入れる", false, (UIElement)Group("ワークフロー (共有)", wfRow, machineHint, secRow)),
                 Tuple.Create("generate", "ComfyUI で生成", false,
                              (UIElement)(settingsOnly ? Group("接続先 (共有)", destRow) : Group("接続先 (共有)", destRow, repeatRow))),
             };
@@ -278,6 +303,76 @@ namespace JRate
                 ((FrameworkElement)c).Margin = new Thickness(80, 4, 0, 0);
                 row.Children.Add(c);
             }
+        }
+
+        // ---------------- セットのカード ----------------
+        private SetCardStrip setStrip;
+        private readonly Dictionary<string, string> wfKinds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        private void RefreshSetCards()
+        {
+            if (setStrip == null) return;
+            var infos = new List<SetCardInfo>();
+            var json = ComfyVideo.NewSerializer();
+            for (int i = 0; i < setList.Length; i++)
+            {
+                var s = setList[i];
+                if (s.IsEmpty)
+                {
+                    var empty = new SetCardInfo { Title = "空き", Empty = true, Tip = "空きの番号です。選んで「保存」を押すと、今の設定をこの番号に保存します。" };
+                    empty.Lines.Add("保存すると、今の設定を");
+                    empty.Lines.Add("ここに入れます");
+                    infos.Add(empty);
+                    continue;
+                }
+                var info = new SetCardInfo { Title = s.Name.Length > 0 ? s.Name : "(名前なし)" };
+                var notes = new List<string>();
+                // 動画か画像か (ワークフローの中身で見分ける。描き直すたびに読まないよう覚えておく)
+                string kind;
+                if (!wfKinds.TryGetValue(s.Workflow, out kind))
+                {
+                    try { kind = ComfyVideo.IsVideoWorkflow(ComfyVideo.LoadWorkflow(json, s.Workflow)) ? "video" : "image"; }
+                    catch { kind = ""; }
+                    wfKinds[s.Workflow] = kind;
+                }
+                if (kind == "video") info.Kind = "🎬 動画" + (s.Seconds.Length > 0 ? "  " + s.Seconds + " 秒" : "");
+                else if (kind == "image") info.Kind = "🖼 画像";
+                else { info.Kind = "⚠ ワークフローを読めません"; info.Warn = true; }
+                int wi = workflowPath.FindIndex(p => string.Equals(p, s.Workflow, StringComparison.OrdinalIgnoreCase));
+                string wfLabel = wi >= 0 ? workflowName[wi] : System.IO.Path.GetFileName(s.Workflow);
+                if (wi < 0) notes.Add("ワークフローが登録にありません");
+                int ci = presetUrl.FindIndex(u => ComfySettings.UrlKey(u) == ComfySettings.UrlKey(s.Url));
+                string connLabel = ci >= 0 && presetName[ci].Length > 0 ? presetName[ci] : s.Url;
+                if (ci < 0) notes.Add("接続先が登録にありません");
+                string machine = MachineConflict(s.Url, s.Workflow);
+                if (machine.Length > 0) notes.Add("ワークフローは " + machine + " 用です (接続先の台と違います)");
+                info.Lines.Add("WF: " + wfLabel);
+                info.Lines.Add("接続: " + connLabel);
+                string prompt = string.Join(" ", s.Prompt.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)).Trim();
+                if (prompt.Length > 0) info.Lines.Add("プロンプト: " + prompt);
+                info.Lines.Add("読取: " + (s.Reader == null ? "—" : s.Reader.Length > 0 ? s.Reader : "なし") +
+                               "  盛る: " + (s.Enhancer == null ? "—" : s.Enhancer.Length > 0 ? s.Enhancer : "なし"));
+                if (notes.Count > 0)
+                {
+                    info.Warn = true;
+                    if (!info.Kind.StartsWith("⚠")) info.Kind += notes.Count == 1 && machine.Length > 0 ? "  ⚠ 台が違う" : "  ⚠ 登録にない";
+                }
+                var tip = new List<string>
+                {
+                    info.Title,
+                    "ワークフロー: " + wfLabel + "  (" + s.Workflow + ")",
+                    "接続先: " + connLabel + "  (" + s.Url + ")"
+                };
+                if (s.Seconds.Length > 0) tip.Add("長さ: " + s.Seconds + " 秒");
+                if (prompt.Length > 0) tip.Add("プロンプト: " + (prompt.Length > 200 ? prompt.Substring(0, 200) + "..." : prompt));
+                tip.Add("読み取り: " + (s.Reader == null ? "(この項目なし。選んでも変えない)" : s.Reader.Length > 0 ? s.Reader : "なし"));
+                if (s.Reread != null) tip.Add("読み取り済みでも読み直す: " + (s.Reread.Value ? "する" : "しない"));
+                tip.Add("エンハンサー: " + (s.Enhancer == null ? "(この項目なし。選んでも変えない)" : s.Enhancer.Length > 0 ? s.Enhancer : "なし"));
+                foreach (string n in notes) tip.Add("⚠ " + n);
+                info.Tip = string.Join("\n", tip);
+                infos.Add(info);
+            }
+            setStrip.Refresh(infos, setBox.SelectedIndex);
         }
 
         private static GroupBox Group(string header, params UIElement[] items)
