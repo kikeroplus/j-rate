@@ -197,12 +197,16 @@ namespace JRate
             };
             cancelButton.Click += delegate
             {
-                foreach (var job in list.SelectedItems.Cast<GenJob>().ToList()) cancel(job);
+                var selected = list.SelectedItems.Cast<GenJob>().ToList();
+                if (!ConfirmCancel(selected, "選択した")) return;
+                foreach (var job in selected) cancel(job);
                 UpdateButtons();
             };
             cancelAllButton.Click += delegate
             {
-                foreach (var job in jobs.ToList()) cancel(job);
+                var all = jobs.ToList();
+                if (!ConfirmCancel(all, "待機中・実行中の")) return;
+                foreach (var job in all) cancel(job);
                 UpdateButtons();
             };
             showButton.Click += delegate
@@ -284,6 +288,19 @@ namespace JRate
         private static Button NewButton(string text)
         {
             return new Button { Content = text, Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(0, 0, 8, 0) };
+        }
+
+        // キャンセルする前に確かめる (待機中・実行中のものだけ数える)。誤って押したときのため、既定は「キャンセル」
+        private bool ConfirmCancel(List<GenJob> list, string what)
+        {
+            var targets = list.Where(j => j.IsActive).ToList();
+            if (targets.Count == 0) return false;
+            int running = targets.Count(j => j.IsRunning);
+            string text = targets.Count == 1 ? "このジョブをキャンセルしますか？\n\n" + targets[0].FileName
+                                             : what + " " + targets.Count + " 件のジョブをキャンセルしますか？";
+            if (running > 0) text += "\n\n実行中のもの (" + running + " 件) は ComfyUI に中断を送ります。";
+            return MessageBox.Show(this, text, "ジョブをキャンセル", MessageBoxButton.OKCancel, MessageBoxImage.Question,
+                                   MessageBoxResult.Cancel) == MessageBoxResult.OK;
         }
 
         private void UpdateButtons()
