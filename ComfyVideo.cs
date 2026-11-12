@@ -1082,6 +1082,25 @@ namespace JRate
                 }
         }
 
+        // 共有の一覧をまとめて並べ替えたとき (mapping は 元の番号 → 新しい番号、0 始まり)、すべてのアプリの番号 (1 始まり) を合わせる
+        public static void RemapIndexes(string sharedFile, Dictionary<int, int> mapping)
+        {
+            string[] names;
+            if (!IndexFiles.TryGetValue(sharedFile, out names)) return;
+            if (!mapping.Any(kv => kv.Key != kv.Value)) return;
+            var dirs = AppDirs();
+            if (!dirs.Any(d => SamePath(d, AppDir))) dirs.Add(AppDir);
+            foreach (string dir in dirs)
+                foreach (string name in names)
+                {
+                    string f = Path.Combine(dir, name);
+                    int n, to;
+                    if (!int.TryParse(ReadText(f), out n)) continue;
+                    if (!mapping.TryGetValue(n - 1, out to) || to == n - 1) continue;
+                    try { WriteText(f, (to + 1).ToString()); } catch { }
+                }
+        }
+
         private static List<string> AppDirs()
         {
             var list = new List<string>();

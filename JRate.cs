@@ -4318,22 +4318,23 @@ namespace JRate
             public readonly Button DeleteButton = new Button { Content = "削除", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0) };
             public readonly Button BulkButton = new Button
             {
-                Content = "まとめて削除...", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0),
-                ToolTip = "登録してあるものから選んで、まとめて未登録にします (ほかの番号は動きません)"
+                Content = BulkEdit.ButtonText, Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0),
+                ToolTip = BulkEdit.ButtonTip
             };
             public int Shown = -1;   // 欄に出しているプリセットの番号
 
             private readonly Func<ComfyPreset, int, string> label;
             private readonly Func<string, string> normalize;
             private readonly Action<ComfyPreset[]> save;
-            private readonly Action<int, int> swapped;   // 2 つの番号を入れ替えたあとに呼ぶ (番号で覚えている設定の付け替え用)
+            // 番号を動かしたあとに呼ぶ (元の番号 → 新しい番号。番号で覚えている設定の付け替え用)
+            private readonly Action<Dictionary<int, int>> remapped;
             // 共有の一覧 (接続先・ワークフロー) は、ほかのアプリで足したものを消さないよう書く前に読み直す (null なら読み直さない)
             private readonly Func<ComfyPreset[]> reload;
             private bool relabeling;   // 一覧の表示をコードから書き換えている間
 
             public PresetTab(ComfyPreset[] list, string caption, string nameCaption, string valueCaption,
                              TextBox valueBox, Button sideButton, Func<ComfyPreset, int, string> label,
-                             Func<string, string> normalize, Action<ComfyPreset[]> save, Action<int, int> swapped,
+                             Func<string, string> normalize, Action<ComfyPreset[]> save, Action<Dictionary<int, int>> remapped,
                              Func<ComfyPreset[]> reload = null)
             {
                 List = list;
@@ -4341,7 +4342,7 @@ namespace JRate
                 this.label = label;
                 this.normalize = normalize;
                 this.save = save;
-                this.swapped = swapped;
+                this.remapped = remapped;
                 this.reload = reload;
 
                 Panel.Children.Add(new TextBlock { Text = caption });
@@ -4423,30 +4424,33 @@ namespace JRate
                 }
             }
 
-            // 選んだものをまとめて未登録にする。戻り値は消した番号と、消す前の値 (やめたら null)
-            public List<KeyValuePair<int, string>> BulkDelete(Window owner, string what, string note)
+            // まとめて削除・並べ替えをする。戻り値は当てはめた結果 (やめたら null)。removedValues は削除したものの値
+            public BulkEditResult BulkEditItems(Window owner, string what, string note, out List<string> removedValues)
             {
+                removedValues = new List<string>();
                 Reload();
                 Relabel();
                 var items = new List<KeyValuePair<int, string>>();
                 for (int i = 0; i < List.Length; i++)
                     if (!List[i].IsEmpty || List[i].Name.Length > 0) items.Add(new KeyValuePair<int, string>(i, label(List[i], i)));
-                var chosen = BulkDeleteDialog.Ask(owner, what, items, note);
-                if (chosen == null) return null;
+                var result = BulkEditDialog.Ask(owner, what, items, note);
+                if (result == null) return null;
                 Reload();
-                var removed = new List<KeyValuePair<int, string>>();
-                foreach (int i in chosen)
-                {
-                    removed.Add(new KeyValuePair<int, string>(i, List[i].Value));
-                    List[i].Clear();
-                }
-                if (chosen.Contains(Shown))
-                {
-                    NameBox.Text = "";
-                    ValueBox.Text = "";
-                }
+                foreach (int i in result.Deleted)
+                    if (i >= 0 && i < List.Length) removedValues.Add(List[i].Value);
+                Dictionary<int, int> mapping;
+                var arranged = BulkEdit.Apply(List, items.Select(kv => kv.Key).ToList(), result,
+                                              () => new ComfyPreset(), p => p.IsEmpty && p.Name.Length == 0, out mapping);
+                for (int i = 0; i < List.Length; i++) List[i] = arranged[i];
+                Shown = BulkEdit.Remap(Shown, mapping);   // 出していた枠が動いたら、その行き先を選ぶ
                 Saved();
-                return removed;
+                if (Shown >= 0)
+                {
+                    NameBox.Text = List[Shown].Name;
+                    ValueBox.Text = List[Shown].Value;
+                }
+                remapped(mapping);
+                return result;
             }
 
             public void Relabel()
@@ -4476,7 +4480,7 @@ namespace JRate
                 Shown = b;
                 Relabel();
                 save(List);
-                swapped(a, b);
+                remapped(new Dictionary<int, int> { { a, b }, { b, a } });
             }
         }
 
@@ -4519,7 +4523,7 @@ namespace JRate
                 "ComfyUI の URL",
                 new TextBox { Padding = new Thickness(2, 3, 2, 3) }, test,
                 (p, i) => p.Label(i), s => s.Trim().TrimEnd('/'), list => ComfySettings.Presets = list,
-                (a, b) => ComfySettings.SwapIndexes(ComfySettings.ConnectionsFile, a, b),   // 共有なので、すべてのアプリの番号を直す
+                m => ComfySettings.RemapIndexes(ComfySettings.ConnectionsFile, m),   // 共有なので、すべてのアプリの番号を直す
                 () => ComfySettings.Presets);
 
             var browse = new Button { Content = "参照...", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0) };
@@ -4529,7 +4533,7 @@ namespace JRate
                 "ワークフロー (ComfyUI のメニュー「Export (API)」で保存した JSON)",
                 new TextBox { Padding = new Thickness(2, 3, 2, 3) }, browse,
                 WorkflowLabel, s => s.Trim().Trim('"'), list => ComfySettings.Workflows = list,
-                (a, b) => ComfySettings.SwapIndexes(ComfySettings.WorkflowsFile, a, b),
+                m => ComfySettings.RemapIndexes(ComfySettings.WorkflowsFile, m),
                 () => ComfySettings.Workflows);
             // 接続先のワークフローのフォルダ (URL の欄の下、ボタンの前)。ワークフローがどの台用かを、置いてあるフォルダで見分ける
             folderBox = new TextBox { Padding = new Thickness(2, 3, 2, 3) };
@@ -4584,12 +4588,13 @@ namespace JRate
                     Padding = new Thickness(2, 3, 2, 3)
                 }, null,
                 (p, i) => p.TextLabel(i), s => s.Trim(), list => ComfySettings.PromptPresets = list,
-                (a, b) =>
+                m =>
                 {
                     // 前回選んでいた番号と、セットが覚えている番号を付け替える
+                    if (!m.Any(kv => kv.Key != kv.Value)) return;
                     int last = ComfySettings.LastPromptPreset;
-                    if (last >= 0) ComfySettings.LastPromptPreset = Swapped(last, a, b);
-                    foreach (var s in sets) s.PromptPreset = Swapped(s.PromptPreset, a, b);
+                    if (last >= 0) ComfySettings.LastPromptPreset = BulkEdit.Remap(last, m);
+                    foreach (var s in sets) s.PromptPreset = BulkEdit.Remap(s.PromptPreset, m);
                     ComfySettings.Sets = sets;
                 });
 
@@ -4645,8 +4650,8 @@ namespace JRate
             };
             var setBulk = new Button
             {
-                Content = "まとめて削除...", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(0, 0, 24, 0),
-                ToolTip = "登録してあるセットから選んで、まとめて未登録にします (ほかの番号は動きません)"
+                Content = BulkEdit.ButtonText, Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(0, 0, 24, 0),
+                ToolTip = BulkEdit.ButtonTip
             };
             setBulk.Click += delegate
             {
@@ -4659,15 +4664,23 @@ namespace JRate
                 var items = new List<KeyValuePair<int, string>>();
                 for (int i = 0; i < sets.Length; i++)
                     if (!sets[i].IsEmpty) items.Add(new KeyValuePair<int, string>(i, sets[i].Label(i)));
-                var chosen = BulkDeleteDialog.Ask(this, "セット", items, "セットは J-Rate だけのものです。");
-                if (chosen == null) return;
-                foreach (int i in chosen)
+                var result = BulkEditDialog.Ask(this, "セット", items, "セットは J-Rate だけのものです。");
+                if (result == null) return;
+                var current = ComfySettings.Sets;
+                Dictionary<int, int> mapping;
+                var arranged = BulkEdit.Apply(current, items.Select(kv => kv.Key).ToList(), result,
+                                              () => new ComfySet(), s => s.IsEmpty, out mapping);
+                int row = setList.SelectedIndex;
+                for (int i = 0; i < sets.Length && i < arranged.Length; i++)
                 {
-                    sets[i] = new ComfySet();
+                    sets[i] = arranged[i];
                     setList.Items[i] = sets[i].Label(i);
                 }
                 ComfySettings.Sets = sets;
-                Result(Brushes.ForestGreen, "セットを " + chosen.Count + " 件未登録にしました");
+                int last = ComfySettings.LastSet;
+                if (last >= 0 && BulkEdit.Remap(last, mapping) != last) ComfySettings.LastSet = BulkEdit.Remap(last, mapping);
+                if (row >= 0) setList.SelectedIndex = BulkEdit.Remap(row, mapping);
+                Result(Brushes.ForestGreen, result.Summary("セット"));
             };
             setButtons.Children.Add(setBulk);
             setButtons.Children.Add(setUp);
@@ -4820,23 +4833,27 @@ namespace JRate
             };
             connection.BulkButton.Click += delegate
             {
-                var removed = connection.BulkDelete(this, "接続先", "接続先は 3 つのアプリで共有しています。消した接続先のワークフローのフォルダも消します。");
-                if (removed == null) return;
-                ComfySettings.RemoveUnusedFolders(removed.Select(kv => kv.Value));
+                List<string> removed;
+                var result = connection.BulkEditItems(this, "接続先", "接続先は 3 つのアプリで共有しています。削除した接続先のワークフローのフォルダも消します。", out removed);
+                if (result == null) return;
+                if (removed.Count > 0) ComfySettings.RemoveUnusedFolders(removed);
                 folders = ComfySettings.ConnectionFolders;
                 ShowFolder();
                 workflow.Relabel();
-                Result(Brushes.ForestGreen, "接続先を " + removed.Count + " 件未登録にしました");
+                Result(Brushes.ForestGreen, result.Summary("接続先"));
             };
             workflow.BulkButton.Click += delegate
             {
-                var removed = workflow.BulkDelete(this, "ワークフロー", "ワークフローは 3 つのアプリで共有しています。JSON のファイルは消しません。");
-                if (removed != null) Result(Brushes.ForestGreen, "ワークフローを " + removed.Count + " 件未登録にしました (JSON のファイルはそのままです)");
+                List<string> removed;
+                var result = workflow.BulkEditItems(this, "ワークフロー", "ワークフローは 3 つのアプリで共有しています。削除しても JSON のファイルは消しません。", out removed);
+                if (result != null)
+                    Result(Brushes.ForestGreen, result.Summary("ワークフロー") + (removed.Count > 0 ? " (JSON のファイルはそのままです)" : ""));
             };
             prompt.BulkButton.Click += delegate
             {
-                var removed = prompt.BulkDelete(this, "プロンプト", "");
-                if (removed != null) Result(Brushes.ForestGreen, "プロンプトを " + removed.Count + " 件未登録にしました");
+                List<string> removed;
+                var result = prompt.BulkEditItems(this, "プロンプト", "", out removed);
+                if (result != null) Result(Brushes.ForestGreen, result.Summary("プロンプト"));
             };
             workflow.DeleteButton.Click += delegate { DeletePreset(workflow, "ワークフロー"); };
             prompt.DeleteButton.Click += delegate { DeletePreset(prompt, "プロンプト"); };

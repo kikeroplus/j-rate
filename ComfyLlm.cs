@@ -640,10 +640,10 @@ namespace JRate
             var del = new Button { Content = "削除", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0) };
             var bulk = new Button
             {
-                Content = "まとめて削除...", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0),
-                ToolTip = "登録してあるプリセットから選んで、まとめて未登録にします (ほかの番号は動きません)"
+                Content = BulkEdit.ButtonText, Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0),
+                ToolTip = BulkEdit.ButtonTip
             };
-            bulk.Click += delegate { BulkDelete(); };
+            bulk.Click += delegate { BulkEditPresets(); };
             buttons.Children.Add(up);
             buttons.Children.Add(down);
             buttons.Children.Add(save);
@@ -720,20 +720,25 @@ namespace JRate
             Saved();
         }
 
-        // 選んだものをまとめて未登録にする (ほかの番号は動かさない)
-        private void BulkDelete()
+        // まとめて削除・並べ替え。すべてのアプリの番号 (前回選んだもの) も並べ替えに合わせる
+        private void BulkEditPresets()
         {
             Reload();
             Saved();
             var items = new List<KeyValuePair<int, string>>();
             for (int i = 0; i < Presets.Length; i++)
                 if (!Presets[i].IsEmpty) items.Add(new KeyValuePair<int, string>(i, Presets[i].Label(i)));
-            var chosen = BulkDeleteDialog.Ask(Window.GetWindow(this), "プリセット", items, "プリセットは 3 つのアプリで共有しています。");
-            if (chosen == null) return;
+            var result = BulkEditDialog.Ask(Window.GetWindow(this), "プリセット", items, "プリセットは 3 つのアプリで共有しています。");
+            if (result == null) return;
             Reload();
-            foreach (int i in chosen) Presets[i] = new LlmPreset { Template = defaultTemplate };
+            Dictionary<int, int> mapping;
+            var arranged = BulkEdit.Apply(Presets, items.Select(kv => kv.Key).ToList(), result,
+                                          () => new LlmPreset { Template = defaultTemplate }, p => p.IsEmpty, out mapping);
+            for (int i = 0; i < Presets.Length; i++) Presets[i] = arranged[i];
+            Shown = BulkEdit.Remap(Shown, mapping);
             ShowPreset(Presets[Shown]);
             Saved();
+            ComfySettings.RemapIndexes(file, mapping);
         }
 
         private void Saved()

@@ -1,6 +1,6 @@
 // 生成の設定の整理 (generation-standard 2・3・4 章。PromptWordCrafter・ImageMimicArt の GenCommon と同じ決まり)
 //   - 接続先ごとのワークフローのフォルダ (comfy_connection_folders.txt、共有) で、ワークフローがどの台用かを見分ける
-//   - まとめて削除 (選んだものを未登録にする。ほかの番号は動かさない)
+//   - まとめて編集 (選んだものを未登録にする・並べ替える・名前順・空きを詰める)
 //   - フォルダから登録 (台のフォルダにある、まだ登録していない JSON をまとめて登録する)
 //   - 図の画面のセットのカード (中身の概要が見えるカードを横に並べて選ぶ)
 using System;
@@ -10,6 +10,7 @@ using System.Linq;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 
@@ -163,47 +164,170 @@ namespace JRate
     }
 
     // ------------------------------------------------------------------
-    // まとめて削除 : 登録してあるものから選んで未登録にする (接続先・ワークフロー・プロンプト・セット・エンハンサー・読み取りプリセット)
+    // まとめて編集 : 登録してあるものをまとめて削除・並べ替えする
+    // (接続先・ワークフロー・プロンプト・セット・エンハンサー・読み取りプリセット。GenCommon の bulk_edit.py と同じ)
     // ------------------------------------------------------------------
-    public class BulkDeleteDialog : Window
+    public class BulkEditResult
     {
-        private readonly List<CheckBox> checks = new List<CheckBox>();
-        private readonly List<int> indexes = new List<int>();
-        private readonly TextBlock countText;
-        private readonly Button ok;
+        public List<int> Order = new List<int>();     // 残すものの元の番号 (0 始まり) を、新しい並びの順に
+        public List<int> Deleted = new List<int>();   // 削除するものの元の番号
+        public bool Pack;                             // 空きを詰めて 1 番から並べる
+
+        // 元の番号 → 新しい番号 (Order の順)。空きを詰めないときは、残すものが元いた番号を小さい順に使う
+        public List<KeyValuePair<int, int>> PlanList()
+        {
+            var slots = Pack ? Enumerable.Range(0, Order.Count).ToList() : Order.OrderBy(i => i).ToList();
+            var list = new List<KeyValuePair<int, int>>();
+            for (int i = 0; i < Order.Count; i++) list.Add(new KeyValuePair<int, int>(Order[i], slots[i]));
+            return list;
+        }
+
+        public Dictionary<int, int> Plan()
+        {
+            return PlanList().ToDictionary(kv => kv.Key, kv => kv.Value);
+        }
+
+        public int Moved { get { return PlanList().Count(kv => kv.Key != kv.Value); } }
+
+        public bool Changed { get { return Deleted.Count > 0 || Moved > 0; } }
+
+        // 「接続先の 1 件を未登録にし、2 件の番号を変更しました」
+        public string Summary(string what)
+        {
+            var parts = new List<string>();
+            if (Deleted.Count > 0) parts.Add(Deleted.Count + " 件を未登録に");
+            if (Moved > 0) parts.Add(Moved + " 件の番号を変更");
+            return what + "の " + string.Join("し、", parts) + "しました";
+        }
+    }
+
+    public static class BulkEdit
+    {
+        public const string ButtonText = "まとめて編集...";
+        public const string ButtonTip = "登録してあるものをまとめて削除したり、並べ替えたり (名前順も) します";
+
+        // 読み直した一覧 current に結果を当てはめる。mapping は実際の 元の番号 → 新しい番号。
+        // listed は画面に出した元の番号。画面を開いている間にほかのアプリが空きに足したもの (listed にない) は
+        // その場所に残し、行き先がそれと重なったときは次の空きに入れる
+        public static T[] Apply<T>(T[] current, IList<int> listed, BulkEditResult result, Func<T> empty,
+                                   Func<T, bool> isEmpty, out Dictionary<int, int> mapping)
+        {
+            var items = (T[])current.Clone();
+            foreach (int i in listed)
+                if (i >= 0 && i < items.Length) items[i] = empty();
+            mapping = new Dictionary<int, int>();
+            var taken = new HashSet<int>();
+            for (int i = 0; i < items.Length; i++) if (!isEmpty(items[i])) taken.Add(i);
+            foreach (var kv in result.PlanList())
+            {
+                int old = kv.Key;
+                if (old < 0 || old >= current.Length) continue;
+                int target = kv.Value;
+                while (target < items.Length && taken.Contains(target)) target++;
+                if (target >= items.Length)   // 入る場所がない (ふつうは起きない): 空いているところへ
+                {
+                    target = -1;
+                    for (int i = 0; i < items.Length; i++) if (!taken.Contains(i)) { target = i; break; }
+                    if (target < 0) continue;
+                }
+                items[target] = current[old];
+                taken.Add(target);
+                mapping[old] = target;
+            }
+            return items;
+        }
+
+        // index 番の行き先 (動かないものはそのまま)
+        public static int Remap(int index, Dictionary<int, int> mapping)
+        {
+            int to;
+            return mapping.TryGetValue(index, out to) ? to : index;
+        }
+
+        // 「3: 名前」の番号を外す
+        public static string StripNumber(string label)
+        {
+            return System.Text.RegularExpressions.Regex.Replace(label ?? "", @"^\d+:\s*", "");
+        }
+    }
+
+    // 名前順の比べ方 (大文字小文字を区別せず、数字は数として比べる: wf2 < wf10)
+    public class NaturalComparer : IComparer<string>
+    {
+        private static readonly System.Text.RegularExpressions.Regex Parts = new System.Text.RegularExpressions.Regex(@"\d+|\D+");
+
+        public int Compare(string a, string b)
+        {
+            var x = Parts.Matches((a ?? "").ToLowerInvariant());
+            var y = Parts.Matches((b ?? "").ToLowerInvariant());
+            for (int i = 0; i < x.Count && i < y.Count; i++)
+            {
+                string p = x[i].Value, q = y[i].Value;
+                bool pd = char.IsDigit(p[0]), qd = char.IsDigit(q[0]);
+                int c;
+                if (pd && qd)
+                {
+                    string pt = p.TrimStart('0'), qt = q.TrimStart('0');
+                    c = pt.Length != qt.Length ? pt.Length.CompareTo(qt.Length) : string.CompareOrdinal(pt, qt);
+                }
+                else if (pd != qd) c = pd ? -1 : 1;   // 数字を先に
+                else c = string.Compare(p, q, StringComparison.CurrentCulture);
+                if (c != 0) return c;
+            }
+            return x.Count.CompareTo(y.Count);
+        }
+    }
+
+    public class BulkEditDialog : Window
+    {
         private readonly string what;
+        private readonly List<int> original = new List<int>();
+        private readonly Dictionary<int, string> texts = new Dictionary<int, string>();
+        private readonly Dictionary<int, ListBoxItem> rows = new Dictionary<int, ListBoxItem>();
+        private readonly Dictionary<int, CheckBox> checks = new Dictionary<int, CheckBox>();
+        private readonly Dictionary<int, TextBlock> labels = new Dictionary<int, TextBlock>();
+        private readonly ListBox list = new ListBox { SelectionMode = SelectionMode.Extended };
+        private readonly CheckBox pack = new CheckBox
+        {
+            Content = "空きを詰めて 1 番から並べる", Margin = new Thickness(0, 8, 0, 0),
+            ToolTip = "オフ: 登録してある番号の位置はそのままで、中身の順だけ変えます。\nオン: 未登録の番号をなくして、1 番から順に詰めます。"
+        };
+        private readonly TextBlock countText = new TextBlock { Margin = new Thickness(0, 6, 0, 0) };
+        private readonly Button ok = new Button { Content = "OK", Width = 90 };
+        private ButtonBase up, down, top, bottom;
+        private bool updating;
 
-        public List<int> Selected { get; private set; }
+        public BulkEditResult Result { get; private set; }
 
-        // items は登録済みのものの (番号 0 始まり, 一覧に出す文字)
-        public BulkDeleteDialog(string what, List<KeyValuePair<int, string>> items, string note)
+        // items は登録してあるものの (元の番号 0 始まり, 一覧に出す文字)
+        public BulkEditDialog(string what, List<KeyValuePair<int, string>> items, string note)
         {
             this.what = what;
-            Title = what + "をまとめて削除";
-            Width = 600;
-            Height = 520;
+            Title = what + "をまとめて編集";
+            Width = 680;
+            Height = 620;
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
             ShowInTaskbar = false;
 
             var root = new DockPanel { Margin = new Thickness(16) };
             var intro = new TextBlock
             {
-                Text = "未登録にする" + what + "にチェックを付けてください。消した番号は空きになり、ほかの番号は動きません " +
-                       "(並び順は「▲ 上へ」「▼ 下へ」で直します)。" + (string.IsNullOrEmpty(note) ? "" : "\n" + note),
+                Text = "削除する" + what + "にチェックを付けます。並び順は、行を選んで「▲ 上へ」「▼ 下へ」か、名前順のボタンで変えます " +
+                       "(Shift / Ctrl で複数を選んで一緒に動かせます)。OK を押すまでは何も変わりません。" +
+                       (string.IsNullOrEmpty(note) ? "" : "\n" + note),
                 TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8)
             };
             DockPanel.SetDock(intro, Dock.Top);
             root.Children.Add(intro);
 
             var buttons = new DockPanel { Margin = new Thickness(0, 8, 0, 0) };
-            var allOn = new Button { Content = "すべて選ぶ", Padding = new Thickness(12, 2, 12, 2) };
+            var allOn = new Button { Content = "すべてチェック", Padding = new Thickness(12, 2, 12, 2) };
             var allOff = new Button { Content = "すべて外す", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0) };
             var left = new StackPanel { Orientation = Orientation.Horizontal };
             left.Children.Add(allOn);
             left.Children.Add(allOff);
             DockPanel.SetDock(left, Dock.Left);
             buttons.Children.Add(left);
-            ok = new Button { Content = "削除", Width = 90 };
             var cancel = new Button { Content = "キャンセル", Width = 90, IsCancel = true, IsDefault = true, Margin = new Thickness(8, 0, 0, 0) };
             var right = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
             right.Children.Add(ok);
@@ -211,62 +335,220 @@ namespace JRate
             buttons.Children.Add(right);
             DockPanel.SetDock(buttons, Dock.Bottom);
             root.Children.Add(buttons);
-            countText = new TextBlock { Margin = new Thickness(0, 6, 0, 0) };
             DockPanel.SetDock(countText, Dock.Bottom);
             root.Children.Add(countText);
+            DockPanel.SetDock(pack, Dock.Bottom);
+            root.Children.Add(pack);
 
-            var list = new StackPanel { Margin = new Thickness(4) };
+            var side = new StackPanel { Margin = new Thickness(8, 0, 0, 0), Width = 110 };
+            up = SideButton("▲ 上へ", "選んでいる行を 1 つ上へ (押し続けると続けて動きます)", true);
+            down = SideButton("▼ 下へ", "選んでいる行を 1 つ下へ (押し続けると続けて動きます)", true);
+            top = SideButton("先頭へ", "選んでいる行をいちばん上へ", false);
+            bottom = SideButton("末尾へ", "選んでいる行をいちばん下へ", false);
+            var sortUp = SideButton("名前順", "名前の順 (あいうえお・ABC 順。数字は数の大きさで比べます) に並べます", false);
+            var sortDown = SideButton("名前の逆順", "名前の逆の順に並べます", false);
+            var reset = SideButton("元の順", "開いたときの並びに戻します (チェックはそのまま)", false);
+            side.Children.Add(up);
+            side.Children.Add(down);
+            side.Children.Add(top);
+            side.Children.Add(bottom);
+            sortUp.Margin = new Thickness(0, 16, 0, 6);
+            side.Children.Add(sortUp);
+            side.Children.Add(sortDown);
+            side.Children.Add(reset);
+            DockPanel.SetDock(side, Dock.Right);
+            root.Children.Add(side);
+
             foreach (var kv in items)
             {
-                var check = new CheckBox { Content = kv.Value, Margin = new Thickness(0, 2, 0, 2) };
-                check.Checked += delegate { Update(); };
-                check.Unchecked += delegate { Update(); };
-                checks.Add(check);
-                indexes.Add(kv.Key);
-                list.Children.Add(check);
+                int id = kv.Key;
+                original.Add(id);
+                texts[id] = BulkEdit.StripNumber(kv.Value);
+                var label = new TextBlock();
+                var check = new CheckBox { Content = label, VerticalContentAlignment = VerticalAlignment.Center };
+                check.Checked += delegate { Refresh(); };
+                check.Unchecked += delegate { Refresh(); };
+                labels[id] = label;
+                checks[id] = check;
+                rows[id] = new ListBoxItem { Content = check, Tag = id, Padding = new Thickness(4, 3, 4, 3) };
+                list.Items.Add(rows[id]);
             }
-            var scroll = new ScrollViewer { Content = list, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, BorderBrush = Brushes.Gray, BorderThickness = new Thickness(1) };
-            root.Children.Add(new Border { BorderBrush = Brushes.Gray, BorderThickness = new Thickness(1), Child = scroll });
+            root.Children.Add(list);
             Content = root;
 
-            allOn.Click += delegate { foreach (var c in checks) c.IsChecked = true; };
-            allOff.Click += delegate { foreach (var c in checks) c.IsChecked = false; };
-            ok.Click += delegate
+            allOn.Click += delegate { CheckAll(true); };
+            allOff.Click += delegate { CheckAll(false); };
+            up.Click += delegate { Move(-1); };
+            down.Click += delegate { Move(1); };
+            top.Click += delegate { MoveEnd(true); };
+            bottom.Click += delegate { MoveEnd(false); };
+            sortUp.Click += delegate { SetOrder(Order().OrderBy(i => texts[i], new NaturalComparer()).ThenBy(i => i).ToList(), SelectedIds()); };
+            sortDown.Click += delegate { SetOrder(Order().OrderByDescending(i => texts[i], new NaturalComparer()).ThenByDescending(i => i).ToList(), SelectedIds()); };
+            reset.Click += delegate { SetOrder(new List<int>(original), SelectedIds()); };
+            pack.Checked += delegate { Refresh(); };
+            pack.Unchecked += delegate { Refresh(); };
+            list.SelectionChanged += delegate { UpdateButtons(); };
+            ok.Click += delegate { Accept(); };
+            if (list.Items.Count > 0) list.SelectedIndex = 0;
+            Refresh();
+        }
+
+        private ButtonBase SideButton(string text, string tip, bool repeat)
+        {
+            ButtonBase b = repeat ? (ButtonBase)new RepeatButton { Delay = 400, Interval = 120 } : new Button();
+            b.Content = text;
+            b.ToolTip = tip;
+            b.Padding = new Thickness(8, 2, 8, 2);
+            b.Margin = new Thickness(0, 0, 0, 6);
+            return b;
+        }
+
+        // ---- 今の状態 ----
+        private List<int> Order()
+        {
+            return list.Items.Cast<ListBoxItem>().Select(r => (int)r.Tag).ToList();
+        }
+
+        private BulkEditResult Current()
+        {
+            var r = new BulkEditResult { Pack = pack.IsChecked == true };
+            foreach (int id in Order())
+                if (checks[id].IsChecked == true) r.Deleted.Add(id); else r.Order.Add(id);
+            return r;
+        }
+
+        private List<int> SelectedRows()
+        {
+            return list.SelectedItems.Cast<ListBoxItem>().Select(r => list.Items.IndexOf(r)).OrderBy(i => i).ToList();
+        }
+
+        private HashSet<int> SelectedIds()
+        {
+            return new HashSet<int>(list.SelectedItems.Cast<ListBoxItem>().Select(r => (int)r.Tag));
+        }
+
+        // 行の文字 (新しい番号・元の番号・削除) と件数を出し直す
+        private void Refresh()
+        {
+            if (updating) return;
+            var result = Current();
+            var plan = result.Plan();
+            foreach (int id in Order())
             {
-                var chosen = Chosen();
-                if (MessageBox.Show(this, what + " " + chosen.Count + " 件を未登録にします。よろしいですか？", Title,
-                                    MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
-                    return;
-                Selected = chosen;
-                DialogResult = true;
-            };
-            Update();
+                var label = labels[id];
+                int to;
+                if (plan.TryGetValue(id, out to))
+                {
+                    label.Text = (to + 1) + ": " + texts[id] + (to == id ? "" : "   (元 " + (id + 1) + ")");
+                    label.TextDecorations = null;
+                    label.Foreground = SystemColors.ControlTextBrush;
+                }
+                else
+                {
+                    label.Text = "削除: " + texts[id] + "   (元 " + (id + 1) + ")";
+                    label.TextDecorations = TextDecorations.Strikethrough;
+                    label.Foreground = Brushes.Gray;
+                }
+            }
+            countText.Text = "登録 " + list.Items.Count + " 件 / 削除 " + result.Deleted.Count + " 件 / 番号が変わる " + result.Moved + " 件";
+            ok.IsEnabled = result.Changed;
+            UpdateButtons();
         }
 
-        private List<int> Chosen()
+        private void UpdateButtons()
         {
-            var list = new List<int>();
-            for (int i = 0; i < checks.Count; i++) if (checks[i].IsChecked == true) list.Add(indexes[i]);
-            return list;
+            var sel = SelectedRows();
+            int n = list.Items.Count;
+            bool canUp = sel.Count > 0 && !sel.SequenceEqual(Enumerable.Range(0, sel.Count));
+            bool canDown = sel.Count > 0 && !sel.SequenceEqual(Enumerable.Range(n - sel.Count, sel.Count));
+            up.IsEnabled = top.IsEnabled = canUp;
+            down.IsEnabled = bottom.IsEnabled = canDown;
         }
 
-        private void Update()
+        // ---- 並べ替え ----
+        // 行を元の番号の並び order に並べ直す (チェックは付いたまま)。selected は選んでおく元の番号
+        private void SetOrder(List<int> order, HashSet<int> selected)
         {
-            int n = Chosen().Count;
-            countText.Text = n + " 件を選んでいます (登録 " + checks.Count + " 件)";
-            ok.IsEnabled = n > 0;
+            updating = true;
+            list.Items.Clear();
+            foreach (int id in order) list.Items.Add(rows[id]);
+            list.SelectedItems.Clear();
+            ListBoxItem first = null;
+            foreach (int id in order)
+                if (selected.Contains(id))
+                {
+                    list.SelectedItems.Add(rows[id]);
+                    if (first == null) first = rows[id];
+                }
+            if (first != null) list.ScrollIntoView(first);
+            updating = false;
+            Refresh();
         }
 
-        // 選ばせる。登録が 1 件もなければ知らせて null。キャンセルなら null
-        public static List<int> Ask(Window owner, string what, List<KeyValuePair<int, string>> items, string note)
+        // 選んでいる行を 1 つ動かす。端に着いた行は止まり、続く行はそこで詰まる (選んだ行どうしの順は崩さない)
+        private void Move(int step)
+        {
+            var sel = SelectedRows();
+            if (sel.Count == 0) return;
+            var ids = SelectedIds();
+            var order = Order();
+            var placed = new HashSet<int>();
+            IEnumerable<int> seq = step < 0 ? sel : Enumerable.Reverse(sel);
+            foreach (int r in seq)
+            {
+                int t = r + step;
+                if (t >= 0 && t < order.Count && !placed.Contains(t))
+                {
+                    int x = order[r]; order[r] = order[t]; order[t] = x;
+                    placed.Add(t);
+                }
+                else placed.Add(r);
+            }
+            SetOrder(order, ids);
+        }
+
+        private void MoveEnd(bool toTop)
+        {
+            var ids = SelectedIds();
+            if (ids.Count == 0) return;
+            var order = Order();
+            var picked = order.Where(ids.Contains).ToList();
+            var rest = order.Where(i => !ids.Contains(i)).ToList();
+            SetOrder(toTop ? picked.Concat(rest).ToList() : rest.Concat(picked).ToList(), ids);
+        }
+
+        private void CheckAll(bool on)
+        {
+            updating = true;
+            foreach (var c in checks.Values) c.IsChecked = on;
+            updating = false;
+            Refresh();
+        }
+
+        private void Accept()
+        {
+            var result = Current();
+            if (!result.Changed) return;
+            var parts = new List<string>();
+            if (result.Deleted.Count > 0) parts.Add(result.Deleted.Count + " 件を削除 (未登録に)");
+            if (result.Moved > 0) parts.Add(result.Moved + " 件の番号を変更");
+            if (MessageBox.Show(this, what + "の" + string.Join("・", parts) + "します。よろしいですか？", Title,
+                                MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
+                return;
+            Result = result;
+            DialogResult = true;
+        }
+
+        // 編集させる。登録が 1 件もなければ知らせて null。キャンセル・変更なしなら null
+        public static BulkEditResult Ask(Window owner, string what, List<KeyValuePair<int, string>> items, string note)
         {
             if (items.Count == 0)
             {
-                MessageBox.Show(owner, "登録してある" + what + "はありません。", what + "をまとめて削除", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show(owner, "登録してある" + what + "はありません。", what + "をまとめて編集", MessageBoxButton.OK, MessageBoxImage.Information);
                 return null;
             }
-            var dlg = new BulkDeleteDialog(what, items, note) { Owner = owner };
-            return dlg.ShowDialog() == true && dlg.Selected != null && dlg.Selected.Count > 0 ? dlg.Selected : null;
+            var dlg = new BulkEditDialog(what, items, note) { Owner = owner };
+            return dlg.ShowDialog() == true ? dlg.Result : null;
         }
     }
 
