@@ -54,7 +54,7 @@ namespace JRate
     {
         public const int Count = 20;
         public const double DefaultTemperature = 0.7;
-        public const string PromptMark = "{prompt}";   // エンハンサーの送る文で、元の文に置き換わる目印
+        public const string PromptMark = "{prompt}";   // エンハンサーの送る文で、元のプロンプトに置き換わる目印
         public const string ReadTemplate = "Write a text-to-image prompt that recreates this image.";
         public static readonly string[] DefaultTemplates = { "", PromptMark, ReadTemplate };   // これだけで指示文がなければ未登録
 
@@ -369,7 +369,7 @@ namespace JRate
             return LlmPresets.Snapshot(p, LlmSettings.Url, LlmSettings.EnhanceModel);
         }
 
-        // 雛形の {prompt} を元の文に置き換える。目印がなければ雛形のあとに付ける
+        // 雛形の {prompt} を元のプロンプトに置き換える。目印がなければ雛形のあとに付ける
         public static string UserMessage(string template, string text)
         {
             if (template.Contains(LlmPresets.PromptMark)) return template.Replace(LlmPresets.PromptMark, text);
@@ -817,8 +817,10 @@ namespace JRate
                                       "画像と一緒に送る短い頼みの文です。空なら既定の文を送ります。", "低いほど毎回同じような説明になります (目安 0.2〜0.7)", index)
                 : new LlmPresetEditor("エンハンサーのプリセット (生成 AI のモデルごとに登録します。3 つのアプリで共有)", Enhancer.File, LlmPresets.PromptMark, Enhancer.Load,
                                       "指示文 (system) — モデルごとに推奨されている指示文を貼ります",
-                                      "送る文の雛形 (user) — " + LlmPresets.PromptMark + " が盛る前のプロンプトに置き換わります",
-                                      "ふつうは " + LlmPresets.PromptMark + " だけで十分です。" + LlmPresets.PromptMark + " がないときは、雛形のあとにプロンプトを付けて送ります。",
+                                      "送る文の雛形 (user) — " + LlmPresets.PromptMark + " が元のプロンプト (盛る前) に置き換わります",
+                                      "ふつうは " + LlmPresets.PromptMark + " だけで十分です。" + LlmPresets.PromptMark + " がないときは、雛形のあとに元のプロンプトを付けて送ります。\n"
+                                      + LlmPresets.PromptMark + " の前後に書いた文も AI に送られるので、盛ったプロンプトに混ざったり、言い換えられたり、"
+                                      + "落とされたりします。必ずそのまま付けたい語はベースプロンプトに書きます (盛ったあとに付きます)。",
                                       "高いほど毎回違う盛り方になります (目安 0.5〜1.0)", index);
             panel.Children.Add(Editor);
 

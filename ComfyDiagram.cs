@@ -49,6 +49,9 @@ namespace JRate
         private bool reading;               // 「今読み取る」の最中
         private bool dialogClosed;
         private string readNote = "";       // 「今読み取る」の結果 (読み取りの段に出す)
+        // 差し込み (名前・盛る前か・次のファイル・中身)、盛る段に渡す文、差し込みの段のあとの文 (RefreshDiagram が決める)
+        private List<Tuple<string, bool, InsertPeek, string>> insertItems = new List<Tuple<string, bool, InsertPeek, string>>();
+        private string enhInput = "", afterInsert = "";
 
         // 真ん中の処理の段。クリックで選ぶ
         private class StepBox : Grid
@@ -180,6 +183,7 @@ namespace JRate
                              (UIElement)Group("入力するプロンプト", promptRow, promptLabel, promptBox,
                                               Hint("「" + Reader.CaptionMark + "」と書くと、そこに説明プロンプトが入ります (なければ説明のあとに改行して続けます)"))),
                 Tuple.Create("enhance", "エンハンサーで盛る", true, (UIElement)Group("エンハンサー (共有)", enhancerRow, llmNote)),
+                Tuple.Create("insert", "差し込みを付ける", true, (UIElement)InsertsForDiagram()),
                 Tuple.Create("base", "ベースプロンプトを付ける", true, (UIElement)Group("ベースプロンプト (共有)", baseCheck, noBaseHint)),
                 Tuple.Create("workflow", "ワークフローに入れる", false, (UIElement)Group("ワークフロー (共有)", wfRow, machineHint, secRow)),
                 Tuple.Create("generate", "ComfyUI で生成", false,
@@ -274,6 +278,17 @@ namespace JRate
             RefreshDiagram();
         }
 
+        // 差し込みの欄を、図の左の列に入れる形に (見出しを短く、赤字の理由も同じ枠に)
+        private UIElement InsertsForDiagram()
+        {
+            insertGroup.Header = "差し込み (1 件ごとに、フォルダの次のテキストを足す)";
+            insertGroup.Margin = new Thickness(0, 2, 0, 2);
+            var stack = (StackPanel)insertGroup.Content;
+            insertError.Margin = new Thickness(0, 2, 0, 0);
+            stack.Children.Add(insertError);
+            return insertGroup;
+        }
+
         // 横に並んだ行 (ラベル・欄・チェック・「設定...」) を、欄を幅いっぱいにした 1 行と、チェックの行に並べ直す
         private static void Restack(StackPanel row)
         {
@@ -352,6 +367,9 @@ namespace JRate
                 if (prompt.Length > 0) info.Lines.Add("プロンプト: " + prompt);
                 info.Lines.Add("読取: " + (s.Reader == null ? "—" : s.Reader.Length > 0 ? s.Reader : "なし") +
                                "  盛る: " + (s.Enhancer == null ? "—" : s.Enhancer.Length > 0 ? s.Enhancer : "なし"));
+                var used = (s.Inserts ?? new List<Dictionary<string, object>>())
+                           .Where(d => d.ContainsKey("use") && d["use"] is bool && (bool)d["use"]).ToList();
+                if (used.Count > 0) info.Lines.Add("差込: " + string.Join("・", used.Select(d => ComfySettings.Str(d, "name"))));
                 if (notes.Count > 0)
                 {
                     info.Warn = true;
@@ -368,6 +386,11 @@ namespace JRate
                 tip.Add("読み取り: " + (s.Reader == null ? "(この項目なし。選んでも変えない)" : s.Reader.Length > 0 ? s.Reader : "なし"));
                 if (s.Reread != null) tip.Add("読み取り済みでも読み直す: " + (s.Reread.Value ? "する" : "しない"));
                 tip.Add("エンハンサー: " + (s.Enhancer == null ? "(この項目なし。選んでも変えない)" : s.Enhancer.Length > 0 ? s.Enhancer : "なし"));
+                if (s.Inserts == null) tip.Add("差し込み: (この項目なし。選んでも変えない)");
+                else if (used.Count == 0) tip.Add("差し込み: なし");
+                foreach (var d in used)
+                    tip.Add("差し込み「" + ComfySettings.Str(d, "name") + "」: " + ComfySettings.Str(d, "folder") +
+                            ((d.ContainsKey("before") && d["before"] is bool && (bool)d["before"]) ? " (盛る前)" : " (盛ったあと)"));
                 foreach (string n in notes) tip.Add("⚠ " + n);
                 info.Tip = string.Join("\n", tip);
                 infos.Add(info);
@@ -431,8 +454,22 @@ namespace JRate
             string capText = !reads ? null : willRead ? "〈読み取った説明プロンプト〉" : caption.Trim();
             string input = canPrompt ? promptBox.Text.Trim() : "";
             string composed = Reader.Compose(input, capText);
-            string afterEnhance = enh != null ? "〈盛った本文〉＋" : composed;
-            string final = !useBase ? afterEnhance : afterEnhance.Length == 0 ? basePrompt : afterEnhance + "\n" + basePrompt;
+            // 差し込み: 使う枠の次のファイル (1 件目のジョブの分)
+            insertItems = new List<Tuple<string, bool, InsertPeek, string>>();
+            foreach (var row in insertRows)
+            {
+                var slot = row.Slot();
+                var look = slot.Use && row.Problem == null ? row.PeekNext() : null;
+                if (look != null) insertItems.Add(Tuple.Create(slot.Label(row.Index), slot.Before, look, Inserts.ReadFile(look.NextFile)));
+            }
+            var beforeParts = new List<string> { composed };
+            beforeParts.AddRange(insertItems.Where(x => x.Item2).Select(x => x.Item4));
+            enhInput = Inserts.Join(beforeParts.ToArray());
+            string afterEnhance = enh != null ? "〈盛ったプロンプト〉" : enhInput;
+            var afterParts = new List<string> { afterEnhance };
+            afterParts.AddRange(insertItems.Where(x => !x.Item2).Select(x => x.Item4));
+            afterInsert = Inserts.Join(afterParts.ToArray());
+            string final = Inserts.Join(afterInsert, useBase ? basePrompt : "");
             bool video = wfData != null && ComfyVideo.IsVideoWorkflow(wfData);
             string kind = video ? "動画用" : "画像用";
 
@@ -463,6 +500,10 @@ namespace JRate
             states["compose"] = Tuple.Create(how, !canPrompt);
             // 3. 盛る
             states["enhance"] = Tuple.Create(enh != null ? enh.Name : "なし (素通り)", enh == null);
+            // 差し込み
+            states["insert"] = insertItems.Count == 0 || !canPrompt ? Tuple.Create("なし (素通り)", true)
+                : Tuple.Create(string.Join("\n", insertItems.Select(x => x.Item1 + ": " + System.IO.Path.GetFileName(x.Item3.NextFile) +
+                                                                      (x.Item2 && enh != null ? " (盛る前)" : ""))), false);
             // 4. ベース
             states["base"] = basePrompt.Length == 0 ? Tuple.Create("ベースプロンプトなし", true)
                            : Tuple.Create(useBase ? "付ける (" + kind + ")" : "付けない", !useBase);
@@ -537,14 +578,29 @@ namespace JRate
                     if (enh == null)
                     {
                         title = step + " のあと";
-                        text = "エンハンサーは「なし」です。前の段の文をそのまま次へ渡します。\n\n" + composed;
+                        text = "エンハンサーは「なし」です。前の段の文をそのまま次へ渡します。\n\n" + enhInput;
                         return;
                     }
                     title = step + ": 生成のときに LLM に送る内容";
                     text = "エンハンサー「" + enh.Name + "」・モデル " + LlmSettings.EnhanceModel + " で盛ります。" +
                            "ジョブの番が来るたびに盛るので、回数を増やすと毎回違う盛り方になります。\n\n" +
-                           "── 指示 (system) ──\n" + enh.System + "\n\n── 送る文 ──\n" + Enhancer.UserMessage(enh.Template, composed);
+                           "── 指示 (system) ──\n" + enh.System + "\n\n── 送る文 ──\n" + Enhancer.UserMessage(enh.Template, enhInput);
                     return;
+                case "insert":
+                {
+                    title = step + " のあと (1 件目の例)";
+                    if (insertItems.Count == 0 || !canPrompt)
+                    {
+                        title = step + " のあと";
+                        text = "差し込みは使いません。前の段の文をそのまま次へ渡します。\n\n" + afterInsert;
+                        return;
+                    }
+                    var lines = insertItems.Select(x => "・" + x.Item1 + ": " + x.Item3.Describe() + "  " +
+                                                        (x.Item2 ? "盛る前に入れる (エンハンサーに渡す)" : "盛ったあとにそのまま付ける")).ToList();
+                    lines.Add("ジョブ 1 件ごとに次のファイルへ進みます (最後まで使ったら最初に戻ります)。");
+                    text = string.Join("\n", lines) + "\n\n" + afterInsert;
+                    return;
+                }
                 case "base":
                     title = step + " のあと: ComfyUI に送る本文";
                     text = (useBase ? "" : basePrompt.Length > 0 ? "(ベースプロンプトを付けません)\n\n" : "(ベースプロンプトは未設定です)\n\n") + final;
@@ -648,7 +704,7 @@ namespace JRate
             if (dialogClosed) return;
             if (done > 0 && rereadCheck.IsChecked == true) rereadCheck.IsChecked = false;   // 今読み取ったので、生成のときは読み直さない
             readNote = error == null ? done + " / " + total + " 枚を今読み取りました" : "読み取りに失敗しました (" + done + " / " + total + ")";
-            okButton.IsEnabled = wfData != null || settingsOnly;
+            UpdateOkButton();
             UpdateLlmHints();   // 「＋ 説明プロンプト」の行と、図の段・右の確認を出し直す
             if (error != null)
                 MessageBox.Show(this, "読み取りに失敗しました。\n\n" + error, Title, MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -672,6 +728,7 @@ namespace JRate
             LlmPresets.SaveIndex(Reader.GenerateFile, CurrentReader());
             LlmPresets.SaveIndex(Enhancer.GenerateFile, CurrentEnhancer());
             Reader.Reread = rereadCheck.IsChecked == true;
+            Inserts.SaveSlots(CurrentSlots());
             DialogResult = true;
         }
     }

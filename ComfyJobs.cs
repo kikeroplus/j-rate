@@ -349,6 +349,7 @@ namespace JRate
                                  : "(ワークフローのまま)");
             if (req.Reader != null) AddRow(grid, "読み取りプリセット", req.ReaderName.Length > 0 ? req.ReaderName : "(名前なし)");
             if (req.Enhancer != null) AddRow(grid, "エンハンサー", req.EnhancerName.Length > 0 ? req.EnhancerName : "(名前なし)");
+            if (req.Inserts != null && req.Inserts.Count > 0) AddRow(grid, "差し込み", Inserts.Summary(req.Inserts));
             panel.Children.Add(grid);
 
             panel.Children.Add(new TextBlock { Text = req.Prompt != null ? "プロンプト (入力したもの)" : "プロンプト (ワークフローのまま)" });
@@ -360,8 +361,22 @@ namespace JRate
             }
             if (req.EnhancedPrompt != null)
             {
-                panel.Children.Add(new TextBlock { Text = "AI で盛ったプロンプト (実際に送った文。このあとにベースプロンプトを付けて送りました)" });
+                panel.Children.Add(new TextBlock { Text = "盛ったプロンプト (AI で盛って、実際に送った文。このあとにベースプロンプトを付けて送りました)" });
                 panel.Children.Add(ReadOnlyBox(req.EnhancedPrompt, 100));
+            }
+
+            foreach (var item in req.Inserts ?? new List<Dictionary<string, object>>())
+            {
+                object b;
+                bool before = item.TryGetValue("before", out b) && b is bool && (bool)b;
+                string when = req.Enhancer == null ? "付けました" : before ? "盛る前に入れました" : "そのまま付けました";
+                panel.Children.Add(new TextBlock
+                {
+                    Text = "差し込み「" + ComfySettings.Str(item, "name") + "」 (" + ComfySettings.Str(item, "file") + "。" +
+                           ComfySettings.Str(item, "folder") + " から。" + when + ")",
+                    TextTrimming = TextTrimming.CharacterEllipsis
+                });
+                panel.Children.Add(ReadOnlyBox(ComfySettings.Str(item, "text"), 60));
             }
 
             if (req.BasePrompt.Length > 0)

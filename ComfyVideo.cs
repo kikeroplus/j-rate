@@ -77,6 +77,7 @@ namespace JRate
         // null はその項目を持たない (前の形式で保存した) もので、選んでもその欄は変えない
         public string Reader, Enhancer;   // 名前 (空 = なし)
         public bool? Reread;              // 読み取り済みでも読み直す
+        public List<Dictionary<string, object>> Inserts;   // 差し込みの欄の形 (ComfyInserts.cs。フォルダは値で覚える)
 
         public bool IsEmpty { get { return Url.Length == 0 && Workflow.Length == 0; } }
 
@@ -112,6 +113,9 @@ namespace JRate
         // エンハンサー: 同じく登録した時点の写し。null = 盛らない
         public Dictionary<string, object> Enhancer;
         public string EnhancedPrompt;    // 盛ったあとの本文 (ジョブの番が来たときに決まる)
+        // 差し込み (ComfyInserts.cs)。ジョブ・記録では使った枠ごとの {slot, name, folder, before, file, text}。
+        // 生成の画面の入力中の内容 (Fields) では欄の形 {slot, name, folder, before, use}。null = 持たない
+        public List<Dictionary<string, object>> Inserts;
 
         public string ReaderName { get { return Reader == null ? "" : ComfySettings.Str(Reader, "name"); } }
         public string EnhancerName { get { return Enhancer == null ? "" : ComfySettings.Str(Enhancer, "name"); } }
@@ -122,15 +126,29 @@ namespace JRate
             get { return Prompt == null ? null : JRate.Reader.Compose(Prompt, Reader != null ? Caption ?? "" : null); }
         }
 
-        // ComfyUI に送るプロンプト : (盛ったときは盛った本文、なければ組み立てたもの)、改行、ベースプロンプトの順。
-        // Prompt が null なら null
+        // エンハンサーに渡す文: 組み立てたもの (元のプロンプト) + 盛る前に入れる差し込み (改行でつなぐ)。Prompt が null なら null
+        public string SourcePrompt
+        {
+            get
+            {
+                if (Prompt == null) return null;
+                var parts = new List<string> { ComposedPrompt };
+                parts.AddRange(JRate.Inserts.Texts(Inserts, true));
+                return JRate.Inserts.Join(parts.ToArray());
+            }
+        }
+
+        // ComfyUI に送るプロンプト : (盛ったときは盛ったプロンプト、なければ SourcePrompt)、盛ったあとの差し込み、
+        // ベースプロンプトの順に改行でつなぐ。Prompt が null なら null
         public string FullPrompt
         {
             get
             {
                 if (Prompt == null) return null;
-                string p = (EnhancedPrompt ?? ComposedPrompt).Trim(), b = (BasePrompt ?? "").Trim();
-                return p.Length == 0 ? b : b.Length == 0 ? p : p + "\n" + b;
+                var parts = new List<string> { EnhancedPrompt ?? SourcePrompt };
+                parts.AddRange(JRate.Inserts.Texts(Inserts, false));
+                parts.Add(BasePrompt);
+                return JRate.Inserts.Join(parts.ToArray());
             }
         }
 
@@ -139,6 +157,7 @@ namespace JRate
             var r = (GenRequest)MemberwiseClone();
             if (Reader != null) r.Reader = new Dictionary<string, object>(Reader);
             if (Enhancer != null) r.Enhancer = new Dictionary<string, object>(Enhancer);
+            if (Inserts != null) r.Inserts = new List<Dictionary<string, object>>(Inserts);
             return r;
         }
     }
@@ -237,6 +256,8 @@ namespace JRate
                     d["enhancer"] = req.EnhancerName;
                     d["enhancedPrompt"] = req.EnhancedPrompt;
                 }
+                // 差し込みは prompt に混ぜない (「旧」の判定などに使うので)。使った枠ごとの名前・フォルダ・ファイル・中身
+                if (req.Inserts != null && req.Inserts.Count > 0) d["inserts"] = req.Inserts;
                 string line = ComfyVideo.NewSerializer().Serialize(d) + "\r\n";
                 string file = ComfySettings.FilePath("comfy_history.txt");
                 lock (Gate)
@@ -306,6 +327,7 @@ namespace JRate
                 r.Request.Enhancer = new Dictionary<string, object> { { "name", ComfySettings.Str(d, "enhancer") } };
                 if (d.TryGetValue("enhancedPrompt", out o) && o != null) r.Request.EnhancedPrompt = o.ToString();
             }
+            if (d.TryGetValue("inserts", out o)) r.Request.Inserts = JRate.Inserts.FromJson(o);
             return r;
         }
     }
@@ -543,6 +565,7 @@ namespace JRate
                         if (d.ContainsKey("enhancer")) list[i].Enhancer = Str(d, "enhancer");
                         object rr;
                         if (d.TryGetValue("reread", out rr) && rr is bool) list[i].Reread = (bool)rr;
+                        if (d.TryGetValue("inserts", out rr)) list[i].Inserts = JRate.Inserts.FromJson(rr);
                     }
                 }
                 catch { }
@@ -563,6 +586,7 @@ namespace JRate
                     if (s.Reader != null) d["reader"] = s.Reader;
                     if (s.Reread != null) d["reread"] = s.Reread.Value;
                     if (s.Enhancer != null) d["enhancer"] = s.Enhancer;
+                    if (s.Inserts != null) d["inserts"] = s.Inserts;
                     arr.Add(d);
                 }
                 Save("comfy_sets.txt", ComfyVideo.NewSerializer().Serialize(arr));

@@ -1612,21 +1612,37 @@ namespace JRate
                 return;
 
             bool batch = total > 1;
-            int group = ++jobGroups;
             int toRead = 0;
-            foreach (string src in sources)
+            // 差し込み: ジョブ 1 件ごとに、使う枠の次のファイルを割り当てる (全部割り当ててから位置を書く)
+            var newJobs = new List<GenJob>();
+            Inserts.Picker picker;
+            try
             {
-                // 説明プロンプトは今の .txt。なければ (または読み直すときは) ジョブの中で読み取る
-                string caption = request.Reader != null ? Reader.ReadCaption(src) : null;
-                bool needRead = request.Reader != null && (dlg.Reread || string.IsNullOrWhiteSpace(caption));
-                if (needRead) toRead++;
-                for (int i = 0; i < repeat; i++)
+                picker = new Inserts.Picker(dlg.InsertSlots);
+                int group = ++jobGroups;
+                foreach (string src in sources)
                 {
-                    var req = request.Clone();   // 盛った本文などをジョブごとに持たせる
-                    req.Caption = needRead || request.Reader == null ? null : caption;
-                    jobs.Add(new GenJob(src, req, batch) { NeedRead = needRead, Group = group });
+                    // 説明プロンプトは今の .txt。なければ (または読み直すときは) ジョブの中で読み取る
+                    string caption = request.Reader != null ? Reader.ReadCaption(src) : null;
+                    bool needRead = request.Reader != null && (dlg.Reread || string.IsNullOrWhiteSpace(caption));
+                    if (needRead) toRead++;
+                    for (int i = 0; i < repeat; i++)
+                    {
+                        var req = request.Clone();   // 盛ったプロンプトなどをジョブごとに持たせる
+                        req.Caption = needRead || request.Reader == null ? null : caption;
+                        req.Inserts = picker.Next();
+                        newJobs.Add(new GenJob(src, req, batch) { NeedRead = needRead, Group = group });
+                    }
                 }
             }
+            catch (InsertException ex)
+            {
+                MessageBox.Show(this, "差し込みのフォルダを使えないので、生成しませんでした。\n\n" + ex.Message, "生成する - J-Rate",
+                                MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            picker.Commit();
+            foreach (var job in newJobs) jobs.Add(job);
             if (batch || paused) ShowJobs();
             StartJobs();
             string note = toRead > 0 ? toRead + " 枚は、ジョブの中で読み取ってから生成します。" : "";
@@ -1808,7 +1824,7 @@ namespace JRate
                 if (paused) throw new GenerationHeldException(false);   // 読み取った説明を持ったまま待機に戻る
             }
             var req = job.Request;
-            string composed = req.ComposedPrompt;
+            string composed = req.SourcePrompt;   // 組み立てたもの + 盛る前に入れる差し込み
             if (req.Enhancer != null && req.EnhancedPrompt == null && !string.IsNullOrWhiteSpace(composed))
             {
                 if (!req.Enhancer.ContainsKey("system"))
@@ -1817,7 +1833,7 @@ namespace JRate
                 string text;
                 try { text = Llm.Wait(() => Enhancer.EnhanceWith(req.Enhancer, composed), token).Trim(); }
                 catch (LlmException ex) { throw new LlmException("AI で盛れませんでした。" + ex.Message); }
-                if (text.Length == 0) throw new LlmException("AI で盛った結果が空でした。");
+                if (text.Length == 0) throw new LlmException("盛ったプロンプトが空でした。");
                 dispatcher.Invoke(new Action(() =>
                 {
                     req.EnhancedPrompt = text;   // ジョブごとに盛るので、回数を増やすと毎回違う盛り方になる
@@ -1939,6 +1955,7 @@ namespace JRate
                 req["caption"] = r.Caption;
                 req["enhancer"] = r.Enhancer;
                 req["enhancedPrompt"] = r.EnhancedPrompt;
+                req["inserts"] = r.Inserts;
                 var d = new Dictionary<string, object>();
                 d["source"] = job.Source;
                 d["batch"] = job.Batch;
@@ -1994,6 +2011,7 @@ namespace JRate
                 if (rq.TryGetValue("caption", out o) && o != null) r.Caption = o.ToString();
                 r.Enhancer = rq.TryGetValue("enhancer", out o) ? o as Dictionary<string, object> : null;
                 if (rq.TryGetValue("enhancedPrompt", out o) && o != null) r.EnhancedPrompt = o.ToString();
+                if (rq.TryGetValue("inserts", out o)) r.Inserts = Inserts.FromJson(o);
                 bool batch = d.TryGetValue("batch", out o) && o is bool && (bool)o;
                 var job = new GenJob(source, r, batch);
                 job.PromptId = ComfySettings.Str(d, "promptId");
@@ -5127,7 +5145,7 @@ namespace JRate
             });
             var saveSet = new Button { Content = "保存", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0), IsEnabled = false };
             var deleteSet = new Button { Content = "削除", Padding = new Thickness(12, 2, 12, 2), Margin = new Thickness(8, 0, 0, 0), IsEnabled = false };
-            saveSet.ToolTip = "今の接続先・ワークフロー・プロンプト・長さ・読み取り・エンハンサーを、選んでいる番号にまとめて保存します";
+            saveSet.ToolTip = "今の接続先・ワークフロー・プロンプト・長さ・読み取り・エンハンサー・差し込みを、選んでいる番号にまとめて保存します";
             DockPanel.SetDock(saveSet, Dock.Right);
             DockPanel.SetDock(deleteSet, Dock.Right);
             setRow.Children.Add(deleteSet);
@@ -5314,6 +5332,15 @@ namespace JRate
             panel.Children.Add(enhancerRow);
             llmNote = new TextBlock { TextWrapping = TextWrapping.Wrap, Foreground = Brushes.DimGray, Margin = new Thickness(80, 0, 0, 12) };
             panel.Children.Add(llmNote);
+
+            // 差し込み: フォルダのテキストを、ジョブ 1 件ごとに 1 つずつ順に足す (ComfyInserts.cs)
+            panel.Children.Add(BuildInserts());
+            insertError = new TextBlock
+            {
+                TextWrapping = TextWrapping.Wrap, Foreground = Brushes.Firebrick,
+                Margin = new Thickness(0, -8, 0, 12), Visibility = Visibility.Collapsed
+            };
+            panel.Children.Add(insertError);
             FillReaders(LlmPresets.LoadIndex(Reader.GenerateFile));
             FillEnhancers(LlmPresets.LoadIndex(Enhancer.GenerateFile));
             readerBox.SelectionChanged += delegate { UpdateLlmHints(); };
@@ -5538,6 +5565,7 @@ namespace JRate
                 if (sets[n].Reread != null) rereadCheck.IsChecked = sets[n].Reread.Value;
                 if (sets[n].Enhancer != null && !SelectEnhancerByName(sets[n].Enhancer))
                     notes.Add("セットのエンハンサー「" + sets[n].Enhancer + "」は登録にないので、「なし」にしました。");
+                if (sets[n].Inserts != null) ApplyInserts(sets[n].Inserts);
                 llmNoteExtra = string.Join("\n", notes);
                 UpdateLlmHints();
                 if (sets[n].Prompt.Length == 0) return;   // プロンプトを持たないセット : プリセットの表示もそのまま
@@ -5570,6 +5598,7 @@ namespace JRate
                 sets[n].Reader = ri >= 0 ? readers[ri].Name : "";
                 sets[n].Reread = rereadCheck.IsChecked == true;
                 sets[n].Enhancer = ei >= 0 ? enhancers[ei].Name : "";
+                sets[n].Inserts = Inserts.ToData(CurrentSlots());
                 ComfySettings.Sets = sets;
                 relabelSet(n);
             };
@@ -5595,6 +5624,8 @@ namespace JRate
                     notes.Add("記録の読み取りプリセット「" + prefill.ReaderName + "」は登録にないので、「なし」にしました。");
                 if (!ApplyLlm(prefill.Enhancer, enhancerIndex, enhancers, enhancerBox) && prefill.EnhancerName.Length > 0)
                     notes.Add("記録のエンハンサー「" + prefill.EnhancerName + "」は登録にないので、「なし」にしました。");
+                // 記録に差し込みがなければ、そのときは使っていない (入力中の内容は欄の形で持つ)
+                ApplyInserts(prefill.Inserts ?? new List<Dictionary<string, object>>());
                 llmNoteExtra = string.Join("\n", notes);
                 UpdateLlmHints();
             }
@@ -5681,6 +5712,7 @@ namespace JRate
             int ri = CurrentReader(), ei = CurrentEnhancer();
             if (ri >= 0) r.Reader = new Dictionary<string, object> { { "name", readers[ri].Name }, { "index", ri } };
             if (ei >= 0) r.Enhancer = new Dictionary<string, object> { { "name", enhancers[ei].Name }, { "index", ei } };
+            r.Inserts = Inserts.ToData(CurrentSlots());
             return r;
         }
 
@@ -5818,7 +5850,7 @@ namespace JRate
                 SaveSettingsOnly();
                 return;
             }
-            if (!okButton.IsEnabled) return;   // ワークフローを読めていない (Ctrl+Enter で来たとき)
+            if (!okButton.IsEnabled) return;   // ワークフローを読めていない・差し込みのフォルダを使えない (Ctrl+Enter で来たとき)
             int repeat;
             if (!int.TryParse(repeatBox.Text.Trim(), out repeat) || repeat < 1 || repeat > MaxRepeat)
             {
@@ -5869,7 +5901,10 @@ namespace JRate
                 LlmPresets.SaveIndex(Reader.GenerateFile, ri);
                 LlmPresets.SaveIndex(Enhancer.GenerateFile, ei);
                 Reader.Reread = rereadCheck.IsChecked == true;
+                Inserts.SaveSlots(CurrentSlots());
             }
+            // 差し込みはプロンプトのあとに足すもの。プロンプトを入れる場所がなければ使わない
+            InsertSlots = promptBox.IsEnabled ? CurrentSlots() : new List<InsertSlot>();
             Request = request;
             Repeat = repeat;
             DialogResult = true;
@@ -5904,7 +5939,7 @@ namespace JRate
             if (!ok) wfData = null;
             workflowError.Text = error ?? "";
             workflowError.Visibility = ok ? Visibility.Collapsed : Visibility.Visible;
-            okButton.IsEnabled = (ok || settingsOnly) && !reading;   // 「図で設定」は、ワークフローを読めなくてもほかの設定を保存できる
+            // 「図で設定」は、ワークフローを読めなくてもほかの設定を保存できる (UpdateOkButton)
 
             promptLabel.Text = hasPrompt || !ok ? "プロンプト (Ctrl+Enter で開始)"
                                                 : "プロンプト (このワークフローには入れる場所がありません)";
@@ -5913,6 +5948,7 @@ namespace JRate
             promptRow.IsEnabled = hasPrompt;
             if (readerRow != null) readerRow.IsEnabled = hasPrompt;
             if (enhancerRow != null) enhancerRow.IsEnabled = hasPrompt;
+            if (insertGroup != null) insertGroup.IsEnabled = hasPrompt;
 
             basePrompt = hasPrompt ? ComfySettings.BasePromptFor(video) : "";
             baseHint.Text = "＋ ベースプロンプト (" + (video ? "動画用" : "画像用") + ") : " +
@@ -5932,6 +5968,7 @@ namespace JRate
             secondsBox.IsEnabled = hasSeconds;
             secondsUnit.Text = hasSeconds || !ok ? "秒" : "秒 (このワークフローでは変えられません)";
             secondsUnit.Foreground = hasSeconds ? Brushes.Black : Brushes.DimGray;
+            UpdateOkButton();
             RefreshDiagram();
         }
 
