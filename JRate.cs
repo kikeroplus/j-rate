@@ -1523,7 +1523,7 @@ namespace JRate
                     if (dlg.Reopen == null) return;
                     // 「生成の設定...」が押された: 設定を出してから、入力していた内容で開き直す
                     prefill = dlg.Reopen;
-                    if (ShowComfySettings())
+                    if (ShowComfySettings(dlg.SettingsTab))
                     {
                         prefill.Url = "";
                         prefill.WorkflowPath = "";
@@ -1587,7 +1587,7 @@ namespace JRate
                     // 「生成の設定...」が押された : 設定を出してから、入力していた内容で開き直す。
                     // 設定を OK で閉じたときは、そこで選んだ接続先とワークフローを使う
                     prefill = dlg.Reopen;
-                    if (ShowComfySettings())
+                    if (ShowComfySettings(dlg.SettingsTab))
                     {
                         prefill.Url = "";
                         prefill.WorkflowPath = "";
@@ -2267,12 +2267,13 @@ namespace JRate
             return it;
         }
 
-        private bool ShowComfySettings()
+        // tab: 開いたときに選んでおくタブの名前 (図の画面の各欄の「設定...」から。空なら最初のタブ)
+        private bool ShowComfySettings(string tab = "")
         {
             // インポートしたあとは、読み込んだ内容で開き直す
             for (;;)
             {
-                var dlg = new ComfySettingsDialog();
+                var dlg = new ComfySettingsDialog(tab);
                 dlg.Owner = this;
                 bool ok = dlg.ShowDialog() == true;
                 if (!dlg.Imported) return ok;
@@ -4522,7 +4523,12 @@ namespace JRate
         // インポートして閉じたとき (呼び出し側が、読み込んだ内容で開き直す)
         public bool Imported { get; private set; }
 
-        public ComfySettingsDialog()
+        public ComfySettingsDialog() : this("")
+        {
+        }
+
+        // tab: 開いたときに選んでおくタブの名前 (「接続先」「ワークフロー」「ベースプロンプト」など)
+        public ComfySettingsDialog(string tab)
         {
             Title = "生成の設定 (ComfyUI)";
             Width = 620;
@@ -4727,6 +4733,8 @@ namespace JRate
             tabs.Items.Add(new TabItem { Header = "プロンプト", Content = prompt.Panel, Padding = new Thickness(12, 3, 12, 3) });
             tabs.Items.Add(new TabItem { Header = "ベースプロンプト", Content = basePanel, Padding = new Thickness(12, 3, 12, 3) });
             tabs.Items.Add(new TabItem { Header = "セット", Content = setPanel, Padding = new Thickness(12, 3, 12, 3) });
+            foreach (TabItem item in tabs.Items)
+                if (!string.IsNullOrEmpty(tab) && (string)item.Header == tab) tabs.SelectedItem = item;
 
             var panel = new StackPanel { Margin = new Thickness(16) };
             string offline = ComfySettings.OfflineMessage;
@@ -5110,6 +5118,18 @@ namespace JRate
         // 「生成の設定...」を押して閉じたときの、各欄の内容 (呼び出し側が設定を出してから、これを初期値にして開き直す)
         public GenRequest Reopen { get; private set; }
 
+        // 「生成の設定」をどのタブで開くか (図の画面の各欄の「設定...」から。空なら最初のタブ)
+        public string SettingsTab { get; private set; }
+
+        // 「生成の設定」を開く: 今の内容を持って閉じ、呼び出し側が設定を出してから開き直す
+        private void OpenSettings(string tab)
+        {
+            SettingsTab = tab;
+            Reopen = Fields();
+            ComfySettings.UseBasePrompt = baseCheck.IsChecked == true;   // 開き直したときも同じ状態に
+            Close();
+        }
+
         public ComfyPromptDialog(string title, List<string> sources, GenRequest prefill)
             : this(title, sources, prefill, false, false, null)
         {
@@ -5474,12 +5494,7 @@ namespace JRate
             Content = panel;
 
             okButton.Click += delegate { Accept(); };
-            settings.Click += delegate
-            {
-                Reopen = Fields();
-                ComfySettings.UseBasePrompt = baseCheck.IsChecked == true;   // 開き直したときも同じ状態に
-                Close();
-            };
+            settings.Click += delegate { OpenSettings(""); };
             copy.Click += delegate { GenClipboard.Copy(copy, copyLabel, Fields()); };
             paste.Click += delegate { Paste(); };
 

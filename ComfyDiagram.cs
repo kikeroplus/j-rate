@@ -173,8 +173,16 @@ namespace JRate
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(StepWidth) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(ArrowWidth) });
 
-            var noBaseText = "ベースプロンプトは未設定です (「生成の設定...」で設定します)";
+            var noBaseText = "ベースプロンプトは未設定です (右の「設定...」で書きます)";
             noBaseHint = new TextBlock { Text = noBaseText, Foreground = Brushes.DimGray, TextWrapping = TextWrapping.Wrap };
+            // ベースプロンプト・ワークフロー・接続先の欄の右に「設定...」(「生成の設定」をその欄のタブで開く)
+            var baseRow = new DockPanel();
+            var baseSettings = TabButton("ベースプロンプト", "ベースプロンプトの文 (画像用・動画用) を書きます");
+            DockPanel.SetDock(baseSettings, Dock.Right);
+            baseRow.Children.Add(baseSettings);
+            baseRow.Children.Add(baseCheck);
+            AddTabButton(wfRow, TabButton("ワークフロー", "ワークフローの登録・並び替え"));
+            AddTabButton(destRow, TabButton("接続先", "接続先 (ComfyUI の URL) の登録・接続テスト"));
             var list = new List<Tuple<string, string, bool, UIElement>>
             {
                 Tuple.Create("read", "読み取り", true,
@@ -184,7 +192,7 @@ namespace JRate
                                               Hint("「" + Reader.CaptionMark + "」と書くと、そこに説明プロンプトが入ります (なければ説明のあとに改行して続けます)"))),
                 Tuple.Create("enhance", "エンハンサーで盛る", true, (UIElement)Group("エンハンサー (共有)", enhancerRow, llmNote)),
                 Tuple.Create("insert", "差し込みを付ける", true, (UIElement)InsertsForDiagram()),
-                Tuple.Create("base", "ベースプロンプトを付ける", true, (UIElement)Group("ベースプロンプト (共有)", baseCheck, noBaseHint)),
+                Tuple.Create("base", "ベースプロンプトを付ける", true, (UIElement)Group("ベースプロンプト (共有)", baseRow, noBaseHint)),
                 Tuple.Create("workflow", "ワークフローに入れる", false, (UIElement)Group("ワークフロー (共有)", wfRow, machineHint, secRow)),
                 Tuple.Create("generate", "ComfyUI で生成", false,
                              (UIElement)(settingsOnly ? Group("接続先 (共有)", destRow) : Group("接続先 (共有)", destRow, repeatRow))),
@@ -396,6 +404,25 @@ namespace JRate
                 infos.Add(info);
             }
             setStrip.Refresh(infos, setBox.SelectedIndex);
+        }
+
+        private Button TabButton(string tab, string what)
+        {
+            var button = new Button
+            {
+                Content = "設定...", Padding = new Thickness(10, 1, 10, 1), Margin = new Thickness(8, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                ToolTip = "「生成の設定」の「" + tab + "」タブを開きます: " + what
+            };
+            button.Click += delegate { OpenSettings(tab); };
+            return button;
+        }
+
+        // 行 (最後の欄が幅いっぱい) の右端に置く。最後の欄の前に入れないと、ボタンが残りの幅を取ってしまう
+        private static void AddTabButton(DockPanel row, Button button)
+        {
+            DockPanel.SetDock(button, Dock.Right);
+            row.Children.Insert(Math.Max(row.Children.Count - 1, 0), button);
         }
 
         private static GroupBox Group(string header, params UIElement[] items)

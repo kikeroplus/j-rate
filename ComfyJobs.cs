@@ -34,6 +34,9 @@ namespace JRate
         public bool Reading;                  // 読み取っている最中 (同じ元画像のほかのジョブを待たせる)
         public bool Held;                     // 一時停止中に待機へ戻したもの (再開するまで実行に移さない)
         public DateTime Started;              // 実行に移った時刻
+        public readonly DateTime QueuedAt = DateTime.Now;   // 登録した時刻 (ジョブ一覧の「生成時刻」のヒント)
+        private DateTime? startedAt;          // 生成を始めた時刻 (ジョブ一覧の「生成時刻」のヒント。待機中は null)
+        private DateTime? finishedAt;         // 終わった時刻 (完了・失敗・キャンセル。ジョブ一覧の「生成時刻」)
 
         private GenState state = GenState.Waiting;
         private string status = "";
@@ -53,7 +56,38 @@ namespace JRate
         public GenState State
         {
             get { return state; }
-            set { state = value; OnPropertyChanged("State"); OnPropertyChanged("StateText"); }
+            set
+            {
+                state = value;
+                // 時刻: 実行に移ったら開始を決め、待機に戻したら (一時停止) 空に戻す。終わったら終了の時刻を残す
+                if (value == GenState.Running) { startedAt = DateTime.Now; finishedAt = null; }
+                else if (value == GenState.Waiting) { startedAt = null; finishedAt = null; }
+                else finishedAt = DateTime.Now;
+                OnPropertyChanged("State"); OnPropertyChanged("StateText");
+                OnPropertyChanged("FinishedText"); OnPropertyChanged("TimesTip");
+            }
+        }
+
+        // 「生成時刻」の列 (生成が終わった時刻): 今日なら 時:分:秒、ほかの日なら 月/日 も付ける
+        public string FinishedText { get { return Clock(finishedAt); } }
+
+        // 「生成時刻」の列のヒント: 登録・生成開始・終了の時刻
+        public string TimesTip
+        {
+            get
+            {
+                string tip = "登録: " + Clock(QueuedAt);
+                if (startedAt != null) tip += "\n生成開始: " + Clock(startedAt);
+                if (finishedAt != null) tip += "\n終了: " + Clock(finishedAt);
+                return tip;
+            }
+        }
+
+        private static string Clock(DateTime? when)
+        {
+            if (when == null) return "";
+            var t = when.Value;
+            return t.Date == DateTime.Today ? t.ToString("HH:mm:ss") : t.Month + "/" + t.Day + " " + t.ToString("HH:mm:ss");
         }
 
         public bool IsRunning { get { return state == GenState.Running; } }
@@ -177,6 +211,11 @@ namespace JRate
             grid.Columns.Add(new GridViewColumn { Header = "ファイル", Width = 190, DisplayMemberBinding = new Binding("FileName") });
             grid.Columns.Add(new GridViewColumn { Header = "ワークフロー", Width = 130, DisplayMemberBinding = new Binding("Workflow") });
             grid.Columns.Add(new GridViewColumn { Header = "状態", Width = 70, DisplayMemberBinding = new Binding("StateText") });
+            // 生成時刻 (指を置くと登録・開始・終了の時刻)
+            var clock = new FrameworkElementFactory(typeof(TextBlock));
+            clock.SetBinding(TextBlock.TextProperty, new Binding("FinishedText"));
+            clock.SetBinding(FrameworkElement.ToolTipProperty, new Binding("TimesTip"));
+            grid.Columns.Add(new GridViewColumn { Header = "生成時刻", Width = 70, CellTemplate = new DataTemplate { VisualTree = clock } });
             grid.Columns.Add(new GridViewColumn { Header = "時間", Width = 60, DisplayMemberBinding = new Binding("RunTimeText") });
             grid.Columns.Add(new GridViewColumn { Header = "内容", Width = 300, DisplayMemberBinding = new Binding("Status") });
             list = new ListView { View = grid, ItemsSource = jobs, SelectionMode = SelectionMode.Extended };
