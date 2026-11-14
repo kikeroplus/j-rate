@@ -1649,6 +1649,27 @@ namespace JRate
             return false;
         }
 
+        // ワークフローの種類: "T2I" / "I2I" / "I2I CN" / "T2V" / "I2V" (セットのカードの色分け)。
+        // 実際に使われる LoadImage があれば画像から (I2○)、動画用なら ○2V。
+        // ControlNet で元の写真の構図・ポーズを写すものは I2I の仲間だが、色を変えるため "I2I CN" にする
+        public static string WorkflowKind(Dictionary<string, object> wf)
+        {
+            var used = UsedNodeIds(wf);
+            bool source = false, control = false;
+            foreach (string id in used)
+            {
+                var node = wf[id] as Dictionary<string, object>;
+                if (node == null) continue;
+                string ct = ClassType(node);
+                var inputs = Inputs(node);
+                if (ct == "LoadImage" && inputs != null && inputs.ContainsKey("image")) source = true;
+                string lower = ct.ToLowerInvariant();
+                if (lower.Contains("controlnet") || (lower.Contains("control") && lower.Contains("apply"))) control = true;
+            }
+            string kind = (source ? "I" : "T") + "2" + (IsVideoWorkflow(wf) ? "V" : "I");
+            return kind == "I2I" && control ? "I2I CN" : kind;
+        }
+
         public const string PromptMarker = "{prompt}";   // ワークフローの文字列にこれがあれば、そこをプロンプトに置き換える
         private static readonly string[] PromptTitles = { "positive", "user prompt" };   // 文字列ノードのタイトルにこれがあればプロンプトを入れる
 

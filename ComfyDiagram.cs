@@ -355,16 +355,17 @@ namespace JRate
                 }
                 var info = new SetCardInfo { Title = s.Name.Length > 0 ? s.Name : "(名前なし)" };
                 var notes = new List<string>();
-                // 動画か画像か (ワークフローの中身で見分ける。描き直すたびに読まないよう覚えておく)
+                // 種類 T2I / I2I / I2I CN / T2V / I2V (ワークフローの中身で見分ける。描き直すたびに読まないよう覚えておく)
                 string kind;
                 if (!wfKinds.TryGetValue(s.Workflow, out kind))
                 {
-                    try { kind = ComfyVideo.IsVideoWorkflow(ComfyVideo.LoadWorkflow(json, s.Workflow)) ? "video" : "image"; }
+                    try { kind = ComfyVideo.WorkflowKind(ComfyVideo.LoadWorkflow(json, s.Workflow)); }
                     catch { kind = ""; }
                     wfKinds[s.Workflow] = kind;
                 }
-                if (kind == "video") info.Kind = "🎬 動画" + (s.Seconds.Length > 0 ? "  " + s.Seconds + " 秒" : "");
-                else if (kind == "image") info.Kind = "🖼 画像";
+                info.WfKind = kind;
+                if (kind.EndsWith("V")) info.Kind = "🎬 動画" + (s.Seconds.Length > 0 ? "  " + s.Seconds + " 秒" : "");
+                else if (kind.Length > 0) info.Kind = "🖼 画像";
                 else { info.Kind = "⚠ ワークフローを読めません"; info.Warn = true; }
                 int wi = workflowPath.FindIndex(p => string.Equals(p, s.Workflow, StringComparison.OrdinalIgnoreCase));
                 string wfLabel = wi >= 0 ? workflowName[wi] : System.IO.Path.GetFileName(s.Workflow);
@@ -390,7 +391,7 @@ namespace JRate
                 }
                 var tip = new List<string>
                 {
-                    info.Title,
+                    info.Title + (kind.Length > 0 ? "  [" + kind + "]" : ""),
                     "ワークフロー: " + wfLabel + "  (" + s.Workflow + ")",
                     "接続先: " + connLabel + "  (" + s.Url + ")"
                 };

@@ -652,6 +652,7 @@ namespace JRate
     public class SetCardInfo
     {
         public string Title = "", Kind = "", Tip = "";
+        public string WfKind = "";   // "T2I" / "I2I" / "I2I CN" / "T2V" / "I2V" (読めなければ空)
         public List<string> Lines = new List<string>();
         public bool Warn, Empty;
     }
@@ -661,6 +662,16 @@ namespace JRate
         public const double CardWidth = 196;
         private static readonly Brush WarnBrush = new SolidColorBrush(Color.FromRgb(0xb7, 0x85, 0x1f));
         private static readonly Brush EmptyLine = new SolidColorBrush(Color.FromRgb(0x9a, 0x9a, 0x9a));
+        // ワークフローの種類の色 (カードの左の帯と種類の札。GenCommon の set_cards.py と同じ)
+        private static readonly Dictionary<string, Brush> KindBrushes = new Dictionary<string, Brush>
+        {
+            { "T2I", new SolidColorBrush(Color.FromRgb(0x3d, 0x8f, 0xe0)) },     // 青
+            { "I2I", new SolidColorBrush(Color.FromRgb(0x2f, 0xa8, 0x6a)) },     // 緑
+            { "I2I CN", new SolidColorBrush(Color.FromRgb(0x8a, 0x4f, 0xd8)) },  // 紫 (ControlNet)
+            { "T2V", new SolidColorBrush(Color.FromRgb(0xe0, 0x86, 0x2c)) },     // 橙
+            { "I2V", new SolidColorBrush(Color.FromRgb(0xd2, 0x4f, 0x8e)) },     // 赤紫
+        };
+        private const double KindStripe = 6;   // 左の帯の太さ
         private readonly StackPanel row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 2, 0, 2) };
         private readonly Action<int> onSelect;
 
@@ -703,7 +714,15 @@ namespace JRate
             };
             if (info.Empty && !selected) frame.StrokeDashArray = new DoubleCollection { 4, 3 };
             grid.Children.Add(frame);
-            var stack = new StackPanel { Margin = new Thickness(9, 6, 9, 7) };
+            Brush kindBrush;
+            KindBrushes.TryGetValue(info.WfKind ?? "", out kindBrush);
+            if (kindBrush != null)
+                grid.Children.Add(new Border
+                {
+                    Width = KindStripe, Background = kindBrush, CornerRadius = new CornerRadius(3),
+                    HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(5, 6, 0, 6)
+                });
+            var stack = new StackPanel { Margin = new Thickness(kindBrush != null ? 5 + KindStripe + 6 : 9, 6, 9, 7) };
 
             var head = new DockPanel { Margin = new Thickness(0, 0, 0, 2) };
             var badge = new Grid { Width = 22, Height = 22, Margin = new Thickness(0, 0, 6, 0) };
@@ -729,7 +748,22 @@ namespace JRate
             });
             stack.Children.Add(head);
             if (info.Kind.Length > 0)
-                stack.Children.Add(new TextBlock { Text = info.Kind, Foreground = info.Warn ? WarnBrush : Brushes.Black, TextTrimming = TextTrimming.CharacterEllipsis });
+            {
+                var kindRow = new DockPanel();
+                if (kindBrush != null)
+                {
+                    var tag = new Border
+                    {
+                        Background = kindBrush, CornerRadius = new CornerRadius(4), Padding = new Thickness(5, 0, 5, 0),
+                        Margin = new Thickness(0, 1, 6, 1), VerticalAlignment = VerticalAlignment.Center,
+                        Child = new TextBlock { Text = info.WfKind, Foreground = Brushes.White, FontWeight = FontWeights.Bold }
+                    };
+                    DockPanel.SetDock(tag, Dock.Left);
+                    kindRow.Children.Add(tag);
+                }
+                kindRow.Children.Add(new TextBlock { Text = info.Kind, Foreground = info.Warn ? WarnBrush : Brushes.Black, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center });
+                stack.Children.Add(kindRow);
+            }
             foreach (string line in info.Lines)
                 stack.Children.Add(new TextBlock { Text = line, Foreground = Brushes.DimGray, TextTrimming = TextTrimming.CharacterEllipsis });
             grid.Children.Add(stack);
