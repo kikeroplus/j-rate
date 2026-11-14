@@ -1359,7 +1359,8 @@ namespace JRate
             }
 
             // 完了を待つ
-            var started = DateTime.Now;
+            var started = DateTime.Now;   // 依頼した時刻 (順番待ちの時間はここから)
+            DateTime? runStarted = null;  // 「生成中」になった時刻 (生成中の時間はここから数え直す)
             int failures = 0;
             Dictionary<string, object> entry = null;
             while (true)
@@ -1389,9 +1390,20 @@ namespace JRate
                         if (held != null && held()) throw new GenerationHeldException(false);
                         promptId = submit();
                         started = DateTime.Now;
+                        runStarted = null;
                         continue;
                     }
-                    progress(state + " " + Elapsed(started));
+                    if (state == "生成中")
+                    {
+                        // 順番待ちの時間は含めない (あと何分で終わるかの目安にするため)
+                        if (runStarted == null) runStarted = DateTime.Now;
+                        progress(state + " " + Elapsed(runStarted.Value));
+                    }
+                    else
+                    {
+                        runStarted = null;
+                        progress(state + " " + Elapsed(started));
+                    }
                 }
                 catch (WebException)
                 {
@@ -1401,7 +1413,7 @@ namespace JRate
                         if (held != null && held()) throw new GenerationHeldException(true);   // 再開したときに、まだ残っていれば受け取る
                         throw new Exception("ComfyUI との接続が切れました。(" + baseUrl + ")");
                     }
-                    progress("ComfyUI の応答待ち... " + Elapsed(started));
+                    progress("ComfyUI の応答待ち... " + Elapsed(runStarted ?? started));
                 }
             }
 
