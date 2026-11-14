@@ -38,6 +38,9 @@ namespace JRate
         private Dictionary<string, object> wfData;     // 選んでいるワークフロー (読めないときは null)
 
         private static readonly Brush OptionalLine = new SolidColorBrush(Color.FromRgb(0xb7, 0x85, 0x1f));
+        // 左の設定の枠を、送る先で色分けする (LM Studio のアイコンの薄紫・ComfyUI のアイコンの黄色を、線で見える濃さに)
+        private static readonly Brush LlmLine = new SolidColorBrush(Color.FromRgb(0xa9, 0xa2, 0xed));
+        private static readonly Brush ComfyLine = new SolidColorBrush(Color.FromRgb(0xd8, 0xc8, 0x00));
         private const double StepWidth = 250, ArrowWidth = 26;
 
         private Dictionary<string, StepBox> steps;     // 図の画面のときだけ
@@ -186,21 +189,23 @@ namespace JRate
             var list = new List<Tuple<string, string, bool, UIElement>>
             {
                 Tuple.Create("read", "読み取り", true,
-                             (UIElement)Group("元画像と読み取り (読み取りプリセットは共有)", readerRow, captionHint)),
+                             (UIElement)Group("元画像と読み取り (読み取りプリセットは共有)", LlmLine, readerRow, captionHint)),
                 Tuple.Create("compose", "組み立て", false,
                              (UIElement)Group("入力するプロンプト", promptRow, promptLabel, promptBox,
                                               Hint("「" + Reader.CaptionMark + "」と書くと、そこに説明プロンプトが入ります (なければ説明のあとに改行して続けます)"))),
-                Tuple.Create("enhance", "エンハンサーで盛る", true, (UIElement)Group("エンハンサー (共有)", enhancerRow, llmNote)),
+                Tuple.Create("enhance", "エンハンサーで盛る", true, (UIElement)Group("エンハンサー (共有)", LlmLine, enhancerRow, llmNote)),
                 Tuple.Create("insert", "差し込みを付ける", true, (UIElement)InsertsForDiagram()),
-                Tuple.Create("base", "ベースプロンプトを付ける", true, (UIElement)Group("ベースプロンプト (共有)", baseRow, noBaseHint)),
-                Tuple.Create("workflow", "ワークフローに入れる", false, (UIElement)Group("ワークフロー (共有)", wfRow, machineHint, secRow)),
+                Tuple.Create("base", "ベースプロンプトを付ける", true, (UIElement)Group("ベースプロンプト (共有)", ComfyLine, baseRow, noBaseHint)),
+                Tuple.Create("workflow", "ワークフローに入れる", false, (UIElement)Group("ワークフロー (共有)", ComfyLine, wfRow, machineHint, secRow)),
                 Tuple.Create("generate", "ComfyUI で生成", false,
-                             (UIElement)(settingsOnly ? Group("接続先 (共有)", destRow) : Group("接続先 (共有)", destRow, repeatRow))),
+                             (UIElement)(settingsOnly ? Group("接続先 (共有)", ComfyLine, destRow) : Group("接続先 (共有)", ComfyLine, destRow, repeatRow))),
             };
 
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             AddAt(grid, Head("ユーザーが設定する"), 0, 0);
             AddAt(grid, Head("処理 (上から順に)"), 0, 2);
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            AddAt(grid, Legend(), 1, 0);
             for (int i = 0; i < list.Count; i++)
             {
                 int row = grid.RowDefinitions.Count;
@@ -427,9 +432,35 @@ namespace JRate
 
         private static GroupBox Group(string header, params UIElement[] items)
         {
+            return Group(header, null, items);
+        }
+
+        // line を渡すと、その色で縁取る (送る先の色分け)
+        private static GroupBox Group(string header, Brush line, params UIElement[] items)
+        {
             var stack = new StackPanel();
             foreach (var item in items) stack.Children.Add(item);
-            return new GroupBox { Header = header, Content = stack, Padding = new Thickness(6), Margin = new Thickness(0, 2, 0, 2) };
+            var box = new GroupBox { Header = header, Content = stack, Padding = new Thickness(6), Margin = new Thickness(0, 2, 0, 2) };
+            if (line != null)
+            {
+                box.BorderBrush = line;
+                box.BorderThickness = new Thickness(2);
+            }
+            return box;
+        }
+
+        // 枠の色の見方
+        private static TextBlock Legend()
+        {
+            var legend = new TextBlock
+            {
+                Foreground = Brushes.DimGray, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 0, 4)
+            };
+            legend.Inlines.Add(new System.Windows.Documents.Run("■ ") { Foreground = LlmLine, FontSize = 15 });
+            legend.Inlines.Add(new System.Windows.Documents.Run("LLM に送る　"));
+            legend.Inlines.Add(new System.Windows.Documents.Run("■ ") { Foreground = ComfyLine, FontSize = 15 });
+            legend.Inlines.Add(new System.Windows.Documents.Run("ComfyUI に送る"));
+            return legend;
         }
 
         private static TextBlock Head(string text)
