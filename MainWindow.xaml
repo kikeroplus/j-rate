@@ -171,6 +171,7 @@
   <Border x:Name="Toolbar" Grid.Row="0" Grid.ColumnSpan="3" Background="#2B2B2B" Padding="8,3">
     <WrapPanel Orientation="Horizontal">
       <Button x:Name="OpenButton" Content="フォルダを開く" Style="{StaticResource Btn}"/>
+      <Button x:Name="RefreshButton" Content="更新" Style="{StaticResource Btn}" ToolTip="フォルダツリーと一覧を読み直します (F5)。表示中のファイルはそのまま選んでおきます"/>
       <Button x:Name="GridButton" Content="グリッド一覧" Style="{StaticResource Btn}" ToolTip="表示中の画像・動画を別ウインドウに一覧表示 (Ctrl+G)"/>
       <Button x:Name="GenerateButton" Content="生成する" Style="{StaticResource Btn}" ToolTip="表示している画像 (複数選択しているときは選択中の画像すべて) から ComfyUI で動画や画像を生成"/>
       <Button x:Name="JobsButton" Content="生成ジョブ" Style="{StaticResource Btn}" ToolTip="ComfyUI での生成の進み具合を一覧表示・キャンセル (Ctrl+J)"/>

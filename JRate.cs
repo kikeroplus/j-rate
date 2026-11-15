@@ -780,6 +780,40 @@ namespace JRate
             loading = null;
         }
 
+        // 「更新」: 読み込み済みのフォルダを読み直す。展開していたフォルダは展開し直し、
+        // 閉じているものは次に展開したときに読み直す。PC・ネットワークの一覧はそのまま、中だけたどる
+        public async Task RefreshAsync()
+        {
+            if (loading == null) return;
+            if (Kind == NodeKind.Folder && !IsExpanded)
+            {
+                Invalidate();
+                return;
+            }
+            try { await loading; } catch { }
+            if (Kind != NodeKind.Folder)
+            {
+                foreach (var c in Children.ToList()) await c.RefreshAsync();
+                return;
+            }
+            var old = Children.Where(c => c.IsExpanded && c.Path != null).ToList();
+            loading = LoadAsync();
+            await loading;
+            await RestoreExpanded(old);
+        }
+
+        private async Task RestoreExpanded(List<FolderNode> old)
+        {
+            foreach (var o in old)
+            {
+                var n = Children.FirstOrDefault(c => SamePath(c.Path, o.Path));
+                if (n == null) continue;
+                n.IsExpanded = true;
+                await n.EnsureChildrenAsync();
+                await n.RestoreExpanded(o.Children.Where(c => c.IsExpanded && c.Path != null).ToList());
+            }
+        }
+
         private async Task LoadAsync()
         {
             List<FolderNode> list;
@@ -1120,6 +1154,7 @@ namespace JRate
             jobsButton.Click += delegate { ShowJobs(); };
             ((Button)root.FindName("ComfySettingsButton")).Click += delegate { ShowComfySettings(); };
             ((Button)root.FindName("OpenButton")).Click += delegate { BrowseFolder(); };
+            ((Button)root.FindName("RefreshButton")).Click += delegate { RefreshFolder(); };
             ((Button)root.FindName("GridButton")).Click += delegate { ShowGrid(); };
             deselectButton = (Button)root.FindName("DeselectButton");
             deselectButton.Click += delegate { ClearMultiSelect(); };
@@ -2306,13 +2341,26 @@ namespace JRate
             if (folder != null) OpenFolder(folder, null);
         }
 
+        // 「更新」(F5): フォルダツリーと一覧を読み直す。表示中のファイルは選び直し、
+        // なくなっていれば同じ位置 (末尾を越えたら最後) のものを選ぶ
+        private async void RefreshFolder()
+        {
+            if (busy) return;
+            if (currentFolder != null)
+                OpenFolder(currentFolder, current != null ? current.Path : null, Math.Max(0, CurrentIndex));
+            var roots = folderTree.ItemsSource as IEnumerable<FolderNode>;
+            if (roots == null) return;
+            foreach (var node in roots.ToList()) await node.RefreshAsync();
+            if (currentFolder != null) SyncTreeTo(currentFolder, true);
+        }
+
         private static bool IsSupportedImage(string path)
         {
             string ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
             return ext == ".jpg" || ext == ".jpeg" || ext == ".jpe" || ext == ".png" || ImageItem.IsVideoFile(path);
         }
 
-        private async void OpenFolder(string folder, string selectFile)
+        private async void OpenFolder(string folder, string selectFile, int fallbackIndex = 0)
         {
             int gen = ++folderGeneration;
 
@@ -2392,7 +2440,8 @@ namespace JRate
                 var target = snapshot.FirstOrDefault(it => string.Equals(it.Path, selectFile, StringComparison.OrdinalIgnoreCase));
                 if (target != null && Matches(target)) thumbList.SelectedItem = target;
             }
-            if (thumbList.SelectedIndex < 0 && thumbList.Items.Count > 0) thumbList.SelectedIndex = 0;
+            if (thumbList.SelectedIndex < 0 && thumbList.Items.Count > 0)
+                thumbList.SelectedIndex = Math.Min(fallbackIndex, thumbList.Items.Count - 1);
             UpdateInfo();
             LoadGridThumbs();   // グリッド一覧が中・大で開いていれば、その大きさのサムネールも作る
 
@@ -3034,6 +3083,12 @@ namespace JRate
                 return;
             }
             if (Keyboard.Modifiers != ModifierKeys.None) return;
+            if (e.Key == Key.F5)
+            {
+                RefreshFolder();
+                e.Handled = true;
+                return;
+            }
 
             int stars = -1;
             if (e.Key >= Key.D0 && e.Key <= Key.D5) stars = e.Key - Key.D0;
@@ -3654,6 +3709,10 @@ namespace JRate
             {
                 switch (e.Key)
                 {
+                    case Key.F5:
+                        RefreshFolder();
+                        e.Handled = true;
+                        return;
                     case Key.Up:
                     case Key.Down:
                         // 上下は 1 行分移動 (複数選択しているときは、選択しているものの前後へ)
