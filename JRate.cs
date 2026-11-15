@@ -306,10 +306,23 @@ namespace JRate
         private const ushort FOF_SILENT = 0x0004;
         private const ushort FOF_NOCONFIRMATION = 0x0010;
         private const ushort FOF_ALLOWUNDO = 0x0040;
+        private const ushort FOF_NOERRORUI = 0x0400;         // 「使用中」などの再試行の画面を出さない (こちらで送り直す)
         private const ushort FOF_WANTNUKEWARNING = 0x4000;   // ごみ箱に入らず完全削除になる場合は確認を出す
 
-        // 戻り値 0 で成功。ユーザーが確認ダイアログで取り消した場合は aborted = true。
-        public static int Send(IntPtr owner, string path, out bool aborted)
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        private static extern uint GetDriveTypeW(string root);
+
+        // ごみ箱に入るか (ネットワーク上のファイルは入らずに、その場で完全に消える)
+        public static bool CanRecycle(string path)
+        {
+            if (path.StartsWith("\\\\")) return false;
+            try { return GetDriveTypeW(System.IO.Path.GetPathRoot(System.IO.Path.GetFullPath(path))) != 4; }   // DRIVE_REMOTE
+            catch { return true; }
+        }
+
+        // 1 回送る。戻り値 0 で成功。ユーザーが確認ダイアログで取り消した場合は aborted = true。
+        // nukeWarning = ごみ箱に入らないときに Windows の確認を出す (ネットワーク上のものは、こちらで先に確認する)
+        private static int SendOnce(IntPtr owner, string path, bool nukeWarning, out bool aborted)
         {
             // pFrom は二重の NUL 終端が必要
             IntPtr from = Marshal.StringToHGlobalUni(path + "\0");
@@ -319,7 +332,8 @@ namespace JRate
                 op.hwnd = owner;
                 op.wFunc = FO_DELETE;
                 op.pFrom = from;
-                op.fFlags = (ushort)(FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_WANTNUKEWARNING);
+                op.fFlags = (ushort)(FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI |
+                                     (nukeWarning ? FOF_WANTNUKEWARNING : 0));
                 int rc = SHFileOperationW(ref op);
                 aborted = op.fAnyOperationsAborted;
                 return rc;
@@ -328,6 +342,118 @@ namespace JRate
             {
                 Marshal.FreeHGlobal(from);
             }
+        }
+
+        public class Result
+        {
+            public int Code;          // 最後に送ったときの SHFileOperation の結果 (0 = 成功)
+            public bool Aborted;      // 確認ダイアログで取り消した
+            public List<string> Left; // 消えずに残ったもの
+        }
+
+        // 送る。使用中で残ったものは、少し待って送り直す (最大 timeoutMs)。再試行の画面は出さない。
+        // 動画は再生を止めても、ファイルを手放すのが少し遅れる (ネットワーク上で 0.5 秒ほど)
+        public static async Task<Result> Send(IntPtr owner, IEnumerable<string> paths, int timeoutMs)
+        {
+            var result = new Result { Left = paths.Where(p => p.Length > 0).ToList() };
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            bool first = true;
+            while (true)
+            {
+                // ごみ箱に入らないものの確認は、最初の 1 回だけ (送り直すたびに聞かない)
+                var nuke = result.Left.Where(CanRecycle).ToList();
+                var plain = result.Left.Where(p => !CanRecycle(p)).ToList();
+                bool aborted = false;
+                result.Code = 0;
+                if (nuke.Count > 0) result.Code = SendOnce(owner, string.Join("\0", nuke), first, out aborted);
+                if (!aborted && plain.Count > 0)
+                {
+                    int rc = SendOnce(owner, string.Join("\0", plain), false, out aborted);
+                    if (rc != 0) result.Code = rc;
+                }
+                first = false;
+                result.Aborted = aborted;
+                result.Left = result.Left.Where(File.Exists).ToList();
+                if (aborted || result.Left.Count == 0 || watch.ElapsedMilliseconds >= timeoutMs) return result;
+                await Task.Delay(200);
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RM_UNIQUE_PROCESS
+        {
+            public int dwProcessId;
+            public System.Runtime.InteropServices.ComTypes.FILETIME ProcessStartTime;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct RM_PROCESS_INFO
+        {
+            public RM_UNIQUE_PROCESS Process;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string strAppName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string strServiceShortName;
+            public int ApplicationType;
+            public uint AppStatus;
+            public uint TSSessionId;
+            [MarshalAs(UnmanagedType.Bool)] public bool bRestartable;
+        }
+
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        private static extern int RmStartSession(out uint session, int flags, System.Text.StringBuilder key);
+
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        private static extern int RmRegisterResources(uint session, uint nFiles, string[] files, uint nApps,
+                                                      RM_UNIQUE_PROCESS[] apps, uint nServices, string[] services);
+
+        [DllImport("rstrtmgr.dll")]
+        private static extern int RmGetList(uint session, out uint needed, ref uint count,
+                                            [In, Out] RM_PROCESS_INFO[] info, ref uint reasons);
+
+        [DllImport("rstrtmgr.dll")]
+        private static extern int RmEndSession(uint session);
+
+        // そのファイルを開いているアプリの名前 (Windows の Restart Manager で調べる。分からなければ空)
+        public static List<string> Lockers(IEnumerable<string> paths)
+        {
+            var names = new List<string>();
+            try
+            {
+                uint session;
+                if (RmStartSession(out session, 0, new System.Text.StringBuilder(64)) != 0) return names;
+                try
+                {
+                    var files = paths.ToArray();
+                    if (RmRegisterResources(session, (uint)files.Length, files, 0, null, 0, null) != 0) return names;
+                    uint needed, count = 0, reasons = 0;
+                    if (RmGetList(session, out needed, ref count, null, ref reasons) != 234 || needed == 0) return names;   // ERROR_MORE_DATA
+                    var info = new RM_PROCESS_INFO[needed];
+                    count = needed;
+                    if (RmGetList(session, out needed, ref count, info, ref reasons) != 0) return names;
+                    int self = System.Diagnostics.Process.GetCurrentProcess().Id;
+                    for (int i = 0; i < count; i++)
+                    {
+                        string name = info[i].Process.dwProcessId == self ? "J-Rate (このアプリ)" : info[i].strAppName;
+                        if (!string.IsNullOrEmpty(name) && !names.Contains(name)) names.Add(name);
+                    }
+                }
+                finally
+                {
+                    RmEndSession(session);
+                }
+            }
+            catch { }
+            return names;
+        }
+
+        // 送り直しても消えなかったときのステータスバーの文 (使っているアプリが分かれば出す)
+        public static string BusyMessage(List<string> left, int code)
+        {
+            string what = left.Count == 1 ? System.IO.Path.GetFileName(left[0]) : left.Count + " 個のファイル";
+            var apps = Lockers(left);
+            return "削除できません: " + what +
+                   (apps.Count > 0 ? " (使用中です。使っているアプリ: " + string.Join("、", apps) + ")"
+                                   : " (使用中か、消す権限がありません。ほかのアプリや PC で開いていないか確かめてください" +
+                                     (code != 0 ? "。エラー " + code : "") + ")");
         }
     }
 
@@ -2963,36 +3089,46 @@ namespace JRate
 
         // ---------------- 操作 ----------------
 
-        // 表示中のファイルをごみ箱へ送る (元に戻せる)
-        private void DeleteCurrent()
+        private bool deleting;   // 使用中のファイルを送り直している間に、もう一度押されないように
+
+        // 表示中のファイルをごみ箱へ送る (元に戻せる。ネットワーク上のものは確かめてから完全に消す)
+        private async void DeleteCurrent()
         {
             var item = Current;
-            if (item == null) return;
+            if (item == null || deleting) return;
             if (thumbList.SelectedItems.Count > 1)
             {
                 DeleteSelected();
                 return;
             }
-            int idx = CurrentIndex;
-            if (item.IsVideo) StopVideo();   // 再生中のファイルを手放す
+            // ネットワーク上のものはごみ箱に入らないので、先に確かめる
+            if (!RecycleBin.CanRecycle(item.Path) &&
+                MessageBox.Show(this, item.FileName + " を削除しますか？\n\nこの場所のファイルはごみ箱に入らず、完全に消えます。", "J-Rate",
+                                MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
+                return;
+            if (item.IsVideo) StopVideo();   // 再生中のファイルを手放す (手放すのが少し遅れるので、消えるまで送り直す)
 
-            bool aborted;
-            int rc = RecycleBin.Send(new WindowInteropHelper(this).Handle, WithCaptions(new[] { item }), out aborted);
-            if (aborted || File.Exists(item.Path))
+            RecycleBin.Result r;
+            deleting = true;
+            try { r = await RecycleBin.Send(new WindowInteropHelper(this).Handle, WithCaptions(new[] { item }).Split('\0'), 3000); }
+            finally { deleting = false; }
+            if (r.Aborted || File.Exists(item.Path))
             {
-                if (item.IsVideo) ShowCurrent();
-                statusText.Text = rc == 0 || aborted
-                    ? "削除を取り消しました: " + item.FileName
-                    : "削除できません: " + item.FileName + " (エラー " + rc + ")";
+                if (item.IsVideo && Current == item && videoPath == null) ShowCurrent();
+                statusText.Text = r.Aborted ? "削除を取り消しました: " + item.FileName
+                                : r.Left.Count > 0 ? RecycleBin.BusyMessage(r.Left, r.Code)
+                                : "削除できません: " + item.FileName;
                 return;
             }
 
+            bool wasCurrent = Current == item;
+            int idx = thumbList.Items.IndexOf(item);
             if (cache.Remove(item.Path)) cacheOrder.Remove(item.Path);
             items.Remove(item);
-            if (thumbList.Items.Count > 0)
+            if (wasCurrent && idx >= 0 && thumbList.Items.Count > 0)
                 thumbList.SelectedIndex = Math.Max(0, Math.Min(idx, thumbList.Items.Count - 1));
-            ShowCurrent();
-            statusText.Text = item.FileName + " をごみ箱に移動しました";
+            if (wasCurrent) ShowCurrent();   // 待っている間にほかへ移っていたら、そちらの表示はそのまま
+            statusText.Text = item.FileName + (RecycleBin.CanRecycle(item.Path) ? " をごみ箱に移動しました" : " を削除しました");
         }
 
         // ごみ箱へ送るもの: ファイルと、画像の説明プロンプトの .txt (同じ名前の別の画像が残るものは除く。
@@ -3005,19 +3141,25 @@ namespace JRate
         }
 
         // 選択している複数のファイルをまとめてごみ箱へ送る (1 つのときと違い、確認してから)
-        private void DeleteSelected()
+        private async void DeleteSelected()
         {
+            if (deleting) return;
             var targets = SelectedItems();
             Window owner = gridWindow != null && gridWindow.IsActive ? (Window)gridWindow : this;
-            if (MessageBox.Show(owner, "選択している " + targets.Count + " 個のファイルをごみ箱に移動しますか？", "J-Rate",
-                                MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
+            bool recycle = targets.All(t => RecycleBin.CanRecycle(t.Path));
+            string ask = recycle
+                ? "選択している " + targets.Count + " 個のファイルをごみ箱に移動しますか？"
+                : "選択している " + targets.Count + " 個のファイルを削除しますか？\n\nこの場所のファイルはごみ箱に入らず、完全に消えます。";
+            if (MessageBox.Show(owner, ask, "J-Rate", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
                 return;
-            int idx = thumbList.Items.IndexOf(targets[0]);
             bool wasVideo = videoPath != null;
-            StopVideo();   // 再生中のファイルを手放す
+            StopVideo();   // 再生中のファイルを手放す (手放すのが少し遅れるので、消えるまで送り直す)
 
-            bool aborted;
-            int rc = RecycleBin.Send(new WindowInteropHelper(this).Handle, WithCaptions(targets), out aborted);
+            RecycleBin.Result r;
+            deleting = true;
+            try { r = await RecycleBin.Send(new WindowInteropHelper(this).Handle, WithCaptions(targets).Split('\0'), 3000); }
+            finally { deleting = false; }
+            int idx = thumbList.Items.IndexOf(targets[0]);
             var gone = targets.Where(t => !File.Exists(t.Path)).ToList();
             foreach (var it in gone)
             {
@@ -3029,9 +3171,13 @@ namespace JRate
             // 表示していた動画が消えずに残った → 止めたので開き直す
             if (wasVideo && videoPath == null && Current != null && Current.IsVideo) ShowCurrent();
 
-            if (gone.Count == targets.Count) statusText.Text = gone.Count + " 個のファイルをごみ箱に移動しました";
-            else if (gone.Count > 0) statusText.Text = gone.Count + " 個のファイルをごみ箱に移動しました (" + (targets.Count - gone.Count) + " 個は削除できませんでした)";
-            else statusText.Text = rc == 0 || aborted ? "削除を取り消しました" : "削除できません (エラー " + rc + ")";
+            string verb = recycle ? "ごみ箱に移動しました" : "削除しました";
+            var left = r.Left.Where(p => targets.Any(t => string.Equals(t.Path, p, StringComparison.OrdinalIgnoreCase))).ToList();
+            if (gone.Count == targets.Count) statusText.Text = gone.Count + " 個のファイルを" + verb;
+            else if (r.Aborted && gone.Count == 0) statusText.Text = "削除を取り消しました";
+            else
+                statusText.Text = (gone.Count > 0 ? gone.Count + " 個のファイルを" + verb + "  " : "") +
+                                  (left.Count > 0 ? RecycleBin.BusyMessage(left, r.Code) : "削除できません");
         }
 
         private void Move(int delta)
