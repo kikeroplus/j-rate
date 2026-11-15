@@ -5295,9 +5295,10 @@ namespace JRate
         private readonly TextBox promptBox, secondsBox, repeatBox;
         private readonly TextBlock workflowError, promptLabel, secondsUnit, baseHint;
         private readonly CheckBox baseCheck;   // 外すとベースプロンプトを付けずに送る (前回の状態を覚える)
-        // 読み取り (なし / 読み取りプリセット) とエンハンサー (なし / 登録済み)。欄の行 → 番号 (なしは -1)
+        // 読み取りとエンハンサー (登録済みのもの)。欄の行 → 番号 (未登録のときの案内は -1)。
+        // 使うかは「使う」のチェックで切る (外しても、選んでいるものは覚えておく。2026-11-15)
         private readonly ComboBox readerBox, enhancerBox;
-        private readonly CheckBox rereadCheck;
+        private readonly CheckBox rereadCheck, readerUseCheck, enhancerUseCheck;
         private readonly TextBlock captionHint, llmNote;
         private readonly StackPanel readerRow, enhancerRow;
         private LlmPreset[] readers, enhancers;
@@ -5533,6 +5534,13 @@ namespace JRate
             // 読み取り: 元画像の説明プロンプト (.txt) を入力したプロンプトに足す。なければジョブの中で読み取る
             readerRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 6) };
             readerRow.Children.Add(new TextBlock { Text = "読み取り", Width = 80, VerticalAlignment = VerticalAlignment.Center });
+            readerUseCheck = new CheckBox
+            {
+                Content = "使う", IsChecked = carry != null ? carry.ReaderUse : Reader.Use, VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 8, 0),
+                ToolTip = "外すと読み取りをせず、入力したプロンプトだけを送ります\n(選んでいる読み取りプリセットは覚えておくので、入れ直すと元に戻ります)"
+            };
+            readerRow.Children.Add(readerUseCheck);
             readerBox = new ComboBox { Width = 300 };
             readerRow.Children.Add(readerBox);
             rereadCheck = new CheckBox
@@ -5550,6 +5558,13 @@ namespace JRate
             // エンハンサー: 組み立てたプロンプトを AI で盛ってから送る
             enhancerRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 6) };
             enhancerRow.Children.Add(new TextBlock { Text = "エンハンサー", Width = 80, VerticalAlignment = VerticalAlignment.Center });
+            enhancerUseCheck = new CheckBox
+            {
+                Content = "使う", IsChecked = carry != null ? carry.EnhancerUse : Enhancer.Use, VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 8, 0),
+                ToolTip = "外すと、プロンプトを盛らずにそのまま送ります\n(選んでいるエンハンサーは覚えておくので、入れ直すと元に戻ります)"
+            };
+            enhancerRow.Children.Add(enhancerUseCheck);
             enhancerBox = new ComboBox { Width = 300 };
             enhancerRow.Children.Add(enhancerBox);
             var enhancerSettings = new Button { Content = "設定...", Padding = new Thickness(10, 1, 10, 1), Margin = new Thickness(8, 0, 0, 0), ToolTip = "エンハンサーの設定 (指示文の登録、LLM のモデル)" };
@@ -5566,22 +5581,26 @@ namespace JRate
                 Margin = new Thickness(0, -8, 0, 12), Visibility = Visibility.Collapsed
             };
             panel.Children.Add(insertError);
-            FillReaders(LlmPresets.LoadIndex(Reader.GenerateFile));
-            FillEnhancers(LlmPresets.LoadIndex(Enhancer.GenerateFile));
+            FillReaders(carry != null ? carry.ReaderPick : LlmPresets.LoadIndex(Reader.GenerateFile));
+            FillEnhancers(carry != null ? carry.EnhancerPick : LlmPresets.LoadIndex(Enhancer.GenerateFile));
             readerBox.SelectionChanged += delegate { UpdateLlmHints(); };
             rereadCheck.Checked += delegate { UpdateLlmHints(); };
             rereadCheck.Unchecked += delegate { UpdateLlmHints(); };
+            readerUseCheck.Checked += delegate { UpdateLlmHints(); };
+            readerUseCheck.Unchecked += delegate { UpdateLlmHints(); };
             enhancerBox.SelectionChanged += delegate { llmNoteExtra = ""; UpdateLlmHints(); };
+            enhancerUseCheck.Checked += delegate { llmNoteExtra = ""; UpdateLlmHints(); };
+            enhancerUseCheck.Unchecked += delegate { llmNoteExtra = ""; UpdateLlmHints(); };
             readerSettings.Click += delegate
             {
-                int cur = CurrentReader();
+                int cur = PickedReader();
                 var dlg = new LlmSettingsDialog(true, Math.Max(cur, 0)) { Owner = this };
                 dlg.ShowDialog();   // プリセットはその場で保存されるので、キャンセルでも読み直す
                 FillReaders(cur);
             };
             enhancerSettings.Click += delegate
             {
-                int cur = CurrentEnhancer();
+                int cur = PickedEnhancer();
                 var dlg = new LlmSettingsDialog(false, Math.Max(cur, 0)) { Owner = this };
                 dlg.ShowDialog();
                 FillEnhancers(cur);
@@ -5676,7 +5695,9 @@ namespace JRate
                     Repeat = repeatBox.Text.Trim().Length > 0 ? repeatBox.Text.Trim() : "1",
                     Set = setBox.SelectedIndex,
                     PromptPreset = promptPresetBox.SelectedIndex,
-                    Reread = rereadCheck.IsChecked == true
+                    Reread = rereadCheck.IsChecked == true,
+                    ReaderUse = readerUseCheck.IsChecked == true, ReaderPick = PickedReader(),
+                    EnhancerUse = enhancerUseCheck.IsChecked == true, EnhancerPick = PickedEnhancer()
                 };
                 ComfySettings.UseBasePrompt = baseCheck.IsChecked == true;
                 SwitchView = true;
@@ -5779,12 +5800,23 @@ namespace JRate
                 if (n < 0 || sets[n].IsEmpty) return;
                 Apply(sets[n].Url, sets[n].Workflow, sets[n].Prompt.Length > 0 ? sets[n].Prompt : null, sets[n].Seconds);
                 // 読み取りとエンハンサーは名前で選ぶ (その項目のないセットでは、今のまま)
+                // 使うかは「使う」のチェックで (前の形式の、名前が空のものは使わない。選んでいるものはそのまま)
                 var notes = new List<string>();
-                if (sets[n].Reader != null && !SelectReaderByName(sets[n].Reader))
-                    notes.Add("セットの読み取りプリセット「" + sets[n].Reader + "」は登録にないので、「なし」にしました。");
+                if (sets[n].Reader != null)
+                {
+                    bool found = SelectReaderByName(sets[n].Reader);
+                    readerUseCheck.IsChecked = sets[n].UsesReader && found;
+                    if (sets[n].UsesReader && !found)
+                        notes.Add("セットの読み取りプリセット「" + sets[n].Reader + "」は登録にないので、使わないことにしました。");
+                }
                 if (sets[n].Reread != null) rereadCheck.IsChecked = sets[n].Reread.Value;
-                if (sets[n].Enhancer != null && !SelectEnhancerByName(sets[n].Enhancer))
-                    notes.Add("セットのエンハンサー「" + sets[n].Enhancer + "」は登録にないので、「なし」にしました。");
+                if (sets[n].Enhancer != null)
+                {
+                    bool found = SelectEnhancerByName(sets[n].Enhancer);
+                    enhancerUseCheck.IsChecked = sets[n].UsesEnhancer && found;
+                    if (sets[n].UsesEnhancer && !found)
+                        notes.Add("セットのエンハンサー「" + sets[n].Enhancer + "」は登録にないので、使わないことにしました。");
+                }
                 if (sets[n].Inserts != null) ApplyInserts(sets[n].Inserts);
                 llmNoteExtra = string.Join("\n", notes);
                 UpdateLlmHints();
@@ -5814,10 +5846,13 @@ namespace JRate
                 sets[n].Prompt = promptBox.IsEnabled ? promptBox.Text.Trim() : "";
                 sets[n].PromptPreset = promptBox.IsEnabled ? promptPresetBox.SelectedIndex : -1;
                 sets[n].Seconds = secondsBox.IsEnabled ? secondsBox.Text.Trim() : "";
-                int ri = CurrentReader(), ei = CurrentEnhancer();
+                // 読み取り・エンハンサーは、選んでいるもの (使わないときも) と「使う」を別に覚える
+                int ri = PickedReader(), ei = PickedEnhancer();
                 sets[n].Reader = ri >= 0 ? readers[ri].Name : "";
+                sets[n].ReaderUse = readerUseCheck.IsChecked == true;
                 sets[n].Reread = rereadCheck.IsChecked == true;
                 sets[n].Enhancer = ei >= 0 ? enhancers[ei].Name : "";
+                sets[n].EnhancerUse = enhancerUseCheck.IsChecked == true;
                 sets[n].Inserts = Inserts.ToData(CurrentSlots());
                 ComfySettings.Sets = sets;
                 relabelSet(n);
@@ -5838,12 +5873,13 @@ namespace JRate
             {
                 Apply(prefill.Url, prefill.WorkflowPath, prefill.Prompt,
                       prefill.Seconds != null ? prefill.Seconds.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "");
-                // 読み取りとエンハンサーは、番号が分かればそれ、なければ同じ名前のもの (登録になければ「なし」にして知らせる)
+                // 読み取りとエンハンサーは、番号が分かればそれ、なければ同じ名前のもの (登録になければ使わないことにして知らせる)。
+                // 記録になければ、そのときは使っていない (「使う」を外す。選んでいるものはそのまま)
                 var notes = new List<string>();
-                if (!ApplyLlm(prefill.Reader, readerIndex, readers, readerBox) && prefill.ReaderName.Length > 0)
-                    notes.Add("記録の読み取りプリセット「" + prefill.ReaderName + "」は登録にないので、「なし」にしました。");
-                if (!ApplyLlm(prefill.Enhancer, enhancerIndex, enhancers, enhancerBox) && prefill.EnhancerName.Length > 0)
-                    notes.Add("記録のエンハンサー「" + prefill.EnhancerName + "」は登録にないので、「なし」にしました。");
+                if (!ApplyLlm(prefill.Reader, readerIndex, readers, readerBox, readerUseCheck) && prefill.ReaderName.Length > 0)
+                    notes.Add("記録の読み取りプリセット「" + prefill.ReaderName + "」は登録にないので、使わないことにしました。");
+                if (!ApplyLlm(prefill.Enhancer, enhancerIndex, enhancers, enhancerBox, enhancerUseCheck) && prefill.EnhancerName.Length > 0)
+                    notes.Add("記録のエンハンサー「" + prefill.EnhancerName + "」は登録にないので、使わないことにしました。");
                 // 記録に差し込みがなければ、そのときは使っていない (入力中の内容は欄の形で持つ)
                 ApplyInserts(prefill.Inserts ?? new List<Dictionary<string, object>>());
                 llmNoteExtra = string.Join("\n", notes);
@@ -5942,64 +5978,97 @@ namespace JRate
         private void FillReaders(int index)
         {
             readers = Reader.Load();
-            FillLlm(readerBox, readerIndex, readers, "なし (入力したプロンプトだけを送る)", index);
+            FillLlm(readerBox, readerIndex, readers, "(読み取りプリセットが未登録です。「設定...」で登録してください)", index);
             UpdateLlmHints();
         }
 
         private void FillEnhancers(int index)
         {
             enhancers = Enhancer.Load();
-            FillLlm(enhancerBox, enhancerIndex, enhancers, "なし (そのまま送る)", index);
+            FillLlm(enhancerBox, enhancerIndex, enhancers, "(エンハンサーが未登録です。「設定...」で登録してください)", index);
             UpdateLlmHints();
         }
 
-        private static void FillLlm(ComboBox box, List<int> index, LlmPreset[] list, string none, int selected)
+        // 登録済みのものを並べ、selected 番を選ぶ (なければ先頭)。1 つもなければ案内だけを出す (番号は -1)
+        private static void FillLlm(ComboBox box, List<int> index, LlmPreset[] list, string empty, int selected)
         {
             box.Items.Clear();
             index.Clear();
-            box.Items.Add(none);
-            index.Add(-1);
             for (int i = 0; i < list.Length; i++)
             {
                 if (list[i].IsEmpty) continue;
                 box.Items.Add(list[i].Label(i));
                 index.Add(i);
             }
+            if (index.Count == 0)
+            {
+                box.Items.Add(empty);
+                index.Add(-1);
+            }
             int pos = index.IndexOf(selected);
             box.SelectedIndex = pos >= 0 ? pos : 0;
         }
 
-        private int CurrentReader() { return readerBox.SelectedIndex > 0 ? readerIndex[readerBox.SelectedIndex] : -1; }
-        private int CurrentEnhancer() { return enhancerBox.SelectedIndex > 0 ? enhancerIndex[enhancerBox.SelectedIndex] : -1; }
+        // 読み取り・エンハンサーの選んでいるもの (使わないときも) と「使う」・読み直すを、前回の値として保存する
+        private void SaveLlmChoices()
+        {
+            int ri = PickedReader(), ei = PickedEnhancer();
+            if (ri >= 0) LlmPresets.SaveIndex(Reader.GenerateFile, ri);
+            if (ei >= 0) LlmPresets.SaveIndex(Enhancer.GenerateFile, ei);
+            Reader.Use = readerUseCheck.IsChecked == true;
+            Enhancer.Use = enhancerUseCheck.IsChecked == true;
+            Reader.Reread = rereadCheck.IsChecked == true;
+        }
+
+        // 選んでいるもの (使うかどうかにかかわらず。未登録なら -1)
+        private int PickedReader() { return readerBox.SelectedIndex >= 0 ? readerIndex[readerBox.SelectedIndex] : -1; }
+        private int PickedEnhancer() { return enhancerBox.SelectedIndex >= 0 ? enhancerIndex[enhancerBox.SelectedIndex] : -1; }
+        // 使うもの (「使う」を外していれば -1)
+        private int CurrentReader() { return readerUseCheck.IsChecked == true ? PickedReader() : -1; }
+        private int CurrentEnhancer() { return enhancerUseCheck.IsChecked == true ? PickedEnhancer() : -1; }
 
         private bool SelectReaderByName(string name) { return SelectByName(name, readerIndex, readers, readerBox); }
         private bool SelectEnhancerByName(string name) { return SelectByName(name, enhancerIndex, enhancers, enhancerBox); }
 
-        // 名前で選ぶ (空なら「なし」)。登録になければ「なし」にして false
+        // 名前で選ぶ。名前が空 (前の形式の「なし」) なら選んでいるものはそのまま。登録になければ false
         private static bool SelectByName(string name, List<int> index, LlmPreset[] list, ComboBox box)
         {
-            int found = string.IsNullOrEmpty(name) ? -1 : Array.FindIndex(list, p => !p.IsEmpty && p.Name == name);
-            box.SelectedIndex = Math.Max(index.IndexOf(found), 0);
-            return string.IsNullOrEmpty(name) || found >= 0;
+            if (string.IsNullOrEmpty(name)) return true;
+            int found = Array.FindIndex(list, p => !p.IsEmpty && p.Name == name);
+            if (found >= 0 && index.Contains(found)) box.SelectedIndex = index.IndexOf(found);
+            return found >= 0;
         }
 
-        // 記録や入力中の内容のものを選ぶ (null なら「なし」)。番号が分かればそれ、なければ名前で探す
-        private static bool ApplyLlm(Dictionary<string, object> snap, List<int> index, LlmPreset[] list, ComboBox box)
+        // 記録や入力中の内容のものを選ぶ。番号が分かればそれ、なければ名前で探す。
+        // snap がない (使っていない) ・登録にないときは「使う」を外す (選んでいるものはそのまま)
+        private static bool ApplyLlm(Dictionary<string, object> snap, List<int> index, LlmPreset[] list, ComboBox box, CheckBox use)
         {
-            if (snap == null) { box.SelectedIndex = 0; return true; }
+            if (snap == null) { use.IsChecked = false; return true; }
             object o;
-            if (snap.TryGetValue("index", out o) && o is int && index.Contains((int)o))
+            if (snap.TryGetValue("index", out o) && o is int && (int)o >= 0 && index.Contains((int)o))
             {
                 box.SelectedIndex = index.IndexOf((int)o);
+                use.IsChecked = true;
                 return true;
             }
-            return SelectByName(ComfySettings.Str(snap, "name"), index, list, box);
+            string name = ComfySettings.Str(snap, "name");
+            bool found = name.Length > 0 && SelectByName(name, index, list, box);
+            use.IsChecked = found;
+            return found;
         }
 
         // 「＋ 説明プロンプト」の行と、読み取り・盛ることの説明
         private void UpdateLlmHints()
         {
             if (captionHint == null || llmNote == null || readers == null || enhancers == null) return;
+            // 登録が 1 つもなければ「使う」にできない。外しているときは選ぶ欄も薄くする
+            bool hasReader = PickedReader() >= 0, hasEnhancer = PickedEnhancer() >= 0;
+            if (!hasReader) readerUseCheck.IsChecked = false;
+            if (!hasEnhancer) enhancerUseCheck.IsChecked = false;
+            readerUseCheck.IsEnabled = hasReader;
+            enhancerUseCheck.IsEnabled = hasEnhancer;
+            readerBox.IsEnabled = hasReader && readerUseCheck.IsChecked == true;
+            enhancerBox.IsEnabled = hasEnhancer && enhancerUseCheck.IsChecked == true;
             bool reads = CurrentReader() >= 0;
             bool reread = rereadCheck.IsChecked == true;
             rereadCheck.IsEnabled = reads;
@@ -6118,9 +6187,7 @@ namespace JRate
                 ReaderPreset = ri >= 0 ? readers[ri] : null;
                 EnhancerPreset = ei >= 0 ? enhancers[ei] : null;
                 Reread = ReaderPreset != null && rereadCheck.IsChecked == true;
-                LlmPresets.SaveIndex(Reader.GenerateFile, ri);
-                LlmPresets.SaveIndex(Enhancer.GenerateFile, ei);
-                Reader.Reread = rereadCheck.IsChecked == true;
+                SaveLlmChoices();
                 Inserts.SaveSlots(CurrentSlots());
             }
             // 差し込みはプロンプトのあとに足すもの。プロンプトを入れる場所がなければ使わない

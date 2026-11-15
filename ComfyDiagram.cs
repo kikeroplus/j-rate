@@ -27,6 +27,9 @@ namespace JRate
             public int Set = -1;
             public int PromptPreset = -1;
             public bool Reread;
+            // 読み取り・エンハンサーは、使わないときも選んでいたものを持っていく
+            public bool ReaderUse, EnhancerUse;
+            public int ReaderPick = -1, EnhancerPick = -1;
         }
 
         // 「図で開く」/「いつもの画面で開く」を押して閉じた (Reopen と Carry で開き直す)
@@ -314,7 +317,8 @@ namespace JRate
             Control fill = null;
             foreach (var item in items)
             {
-                if (item is CheckBox) { checks.Add(item); continue; }
+                // 「使う」のチェックは欄の前にそのまま置く (ほかのチェックは下の行へ)
+                if (item is CheckBox && !"使う".Equals(((CheckBox)item).Content)) { checks.Add(item); continue; }
                 if (item is ComboBox) { fill = (Control)item; continue; }
                 var fe = (FrameworkElement)item;
                 DockPanel.SetDock(fe, item is Button ? Dock.Right : Dock.Left);
@@ -334,6 +338,14 @@ namespace JRate
         }
 
         // ---------------- セットのカード ----------------
+        // 読み取り・エンハンサーの指に置いたときの説明 (使わないときも、選んでいたものを添える)
+        private static string UseText(string name, bool use)
+        {
+            if (name == null) return "(この項目なし。選んでも変えない)";
+            if (use) return name;
+            return "使わない" + (name.Length > 0 ? " (選んでいるもの: " + name + ")" : "");
+        }
+
         private SetCardStrip setStrip;
         private readonly Dictionary<string, string> wfKinds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -379,8 +391,8 @@ namespace JRate
                 info.Lines.Add("接続: " + connLabel);
                 string prompt = string.Join(" ", s.Prompt.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)).Trim();
                 if (prompt.Length > 0) info.Lines.Add("プロンプト: " + prompt);
-                info.Lines.Add("読取: " + (s.Reader == null ? "—" : s.Reader.Length > 0 ? s.Reader : "なし") +
-                               "  盛る: " + (s.Enhancer == null ? "—" : s.Enhancer.Length > 0 ? s.Enhancer : "なし"));
+                info.Lines.Add("読取: " + (s.Reader == null ? "—" : s.UsesReader ? s.Reader : "使わない") +
+                               "  盛る: " + (s.Enhancer == null ? "—" : s.UsesEnhancer ? s.Enhancer : "使わない"));
                 var used = (s.Inserts ?? new List<Dictionary<string, object>>())
                            .Where(d => d.ContainsKey("use") && d["use"] is bool && (bool)d["use"]).ToList();
                 if (used.Count > 0) info.Lines.Add("差込: " + string.Join("・", used.Select(d => ComfySettings.Str(d, "name"))));
@@ -397,9 +409,9 @@ namespace JRate
                 };
                 if (s.Seconds.Length > 0) tip.Add("長さ: " + s.Seconds + " 秒");
                 if (prompt.Length > 0) tip.Add("プロンプト: " + (prompt.Length > 200 ? prompt.Substring(0, 200) + "..." : prompt));
-                tip.Add("読み取り: " + (s.Reader == null ? "(この項目なし。選んでも変えない)" : s.Reader.Length > 0 ? s.Reader : "なし"));
-                if (s.Reread != null) tip.Add("読み取り済みでも読み直す: " + (s.Reread.Value ? "する" : "しない"));
-                tip.Add("エンハンサー: " + (s.Enhancer == null ? "(この項目なし。選んでも変えない)" : s.Enhancer.Length > 0 ? s.Enhancer : "なし"));
+                tip.Add("読み取り: " + UseText(s.Reader, s.UsesReader));
+                if (s.Reread != null && s.UsesReader) tip.Add("読み取り済みでも読み直す: " + (s.Reread.Value ? "する" : "しない"));
+                tip.Add("エンハンサー: " + UseText(s.Enhancer, s.UsesEnhancer));
                 if (s.Inserts == null) tip.Add("差し込み: (この項目なし。選んでも変えない)");
                 else if (used.Count == 0) tip.Add("差し込み: なし");
                 foreach (var d in used)
@@ -534,7 +546,7 @@ namespace JRate
 
             var states = new Dictionary<string, Tuple<string, bool>>();
             // 1. 読み取り
-            if (!reads) states["read"] = Tuple.Create("なし (説明プロンプトを使わない)", true);
+            if (!reads) states["read"] = Tuple.Create("使わない (入力したプロンプトだけ)", true);
             else if (sources.Count > 1)
             {
                 int done = captions.Count(c => !string.IsNullOrWhiteSpace(c));
@@ -558,7 +570,7 @@ namespace JRate
                        : input.Length == 0 ? "説明だけ" : "説明 + 改行 + 入力";
             states["compose"] = Tuple.Create(how, !canPrompt);
             // 3. 盛る
-            states["enhance"] = Tuple.Create(enh != null ? enh.Name : "なし (素通り)", enh == null);
+            states["enhance"] = Tuple.Create(enh != null ? enh.Name : "使わない (素通り)", enh == null);
             // 差し込み
             states["insert"] = insertItems.Count == 0 || !canPrompt ? Tuple.Create("なし (素通り)", true)
                 : Tuple.Create(string.Join("\n", insertItems.Select(x => x.Item1 + ": " + System.IO.Path.GetFileName(x.Item3.NextFile) +
@@ -608,7 +620,7 @@ namespace JRate
                     title = step + " のあと: 説明プロンプト";
                     if (!reads)
                     {
-                        text = "読み取りは「なし」です。説明プロンプトは使わず、入力したプロンプトだけを送ります。";
+                        text = "読み取りは使いません。説明プロンプトは使わず、入力したプロンプトだけを送ります。";
                         return;
                     }
                     string how = "読み取りプリセット「" + readers[ri].Name + "」・モデル " + LlmSettings.ReaderModel + " で読み取ります。\n" +
@@ -637,7 +649,7 @@ namespace JRate
                     if (enh == null)
                     {
                         title = step + " のあと";
-                        text = "エンハンサーは「なし」です。前の段の文をそのまま次へ渡します。\n\n" + enhInput;
+                        text = "エンハンサーは使いません。前の段の文をそのまま次へ渡します。\n\n" + enhInput;
                         return;
                     }
                     title = step + ": 生成のときに LLM に送る内容";
@@ -784,9 +796,7 @@ namespace JRate
                 ComfySettings.LastPromptPreset = promptPresetBox.SelectedIndex;
             }
             ComfySettings.UseBasePrompt = baseCheck.IsChecked == true;
-            LlmPresets.SaveIndex(Reader.GenerateFile, CurrentReader());
-            LlmPresets.SaveIndex(Enhancer.GenerateFile, CurrentEnhancer());
-            Reader.Reread = rereadCheck.IsChecked == true;
+            SaveLlmChoices();
             Inserts.SaveSlots(CurrentSlots());
             DialogResult = true;
         }

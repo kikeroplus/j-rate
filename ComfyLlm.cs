@@ -332,7 +332,15 @@ namespace JRate
     public static class Enhancer
     {
         public const string File = "enhancer_presets.json";      // 共有
-        public const string GenerateFile = "enhancer_generate.txt";   // 生成の画面で前回選んだ番号 (0 = なし)
+        public const string GenerateFile = "enhancer_generate.txt";   // 生成の画面で前回選んだ番号 (前の形式では 0 = なし)
+        public const string UseFile = "enhancer_use.txt";             // 生成の画面の「使う」
+
+        // 「使う」の前回の値。ファイルがなければ前の形式 (「なし」を選んで切っていた) から決める
+        public static bool Use
+        {
+            get { string v = ComfySettings.Load(UseFile); return v == "1" || v == "0" ? v == "1" : LlmPresets.LoadIndex(GenerateFile) >= 0; }
+            set { ComfySettings.Save(UseFile, value ? "1" : "0"); }
+        }
 
         private static readonly LlmPreset[] Examples =
         {
@@ -437,6 +445,15 @@ namespace JRate
         {
             get { return ComfySettings.Load(RereadFile) == "1"; }
             set { ComfySettings.Save(RereadFile, value ? "1" : "0"); }
+        }
+
+        public const string UseFile = "reader_use.txt";   // 生成の画面の「使う」
+
+        // 「使う」の前回の値。ファイルがなければ前の形式 (「なし」を選んで切っていた) から決める
+        public static bool Use
+        {
+            get { string v = ComfySettings.Load(UseFile); return v == "1" || v == "0" ? v == "1" : LlmPresets.LoadIndex(GenerateFile) >= 0; }
+            set { ComfySettings.Save(UseFile, value ? "1" : "0"); }
         }
 
         // ---- 説明プロンプトのファイル ----

@@ -75,11 +75,15 @@ namespace JRate
         public int PromptPreset = -1;   // 保存したときに選んでいたプロンプトのプリセットの番号 (0 始まり。なければ -1)
         // 読み取りプリセットとエンハンサーは共有の登録なので名前で覚える (generation-standard 2 章)。
         // null はその項目を持たない (前の形式で保存した) もので、選んでもその欄は変えない
-        public string Reader, Enhancer;   // 名前 (空 = なし)
+        public string Reader, Enhancer;   // 名前 (使わないときも、選んでいたものを覚える)
         public bool? Reread;              // 読み取り済みでも読み直す
         public List<Dictionary<string, object>> Inserts;   // 差し込みの欄の形 (ComfyInserts.cs。フォルダは値で覚える)
+        // 読み取り・エンハンサーを使うか (2026-11-15 の「使う」チェック)。null は前の形式で、名前が空なら使わない
+        public bool? ReaderUse, EnhancerUse;
 
         public bool IsEmpty { get { return Url.Length == 0 && Workflow.Length == 0; } }
+        public bool UsesReader { get { return ReaderUse ?? !string.IsNullOrEmpty(Reader); } }
+        public bool UsesEnhancer { get { return EnhancerUse ?? !string.IsNullOrEmpty(Enhancer); } }
 
         // 一覧に出す文字列 (index は 0 始まり)
         public string Label(int index)
@@ -565,6 +569,8 @@ namespace JRate
                         if (d.ContainsKey("enhancer")) list[i].Enhancer = Str(d, "enhancer");
                         object rr;
                         if (d.TryGetValue("reread", out rr) && rr is bool) list[i].Reread = (bool)rr;
+                        if (d.TryGetValue("readerUse", out rr) && rr is bool) list[i].ReaderUse = (bool)rr;
+                        if (d.TryGetValue("enhancerUse", out rr) && rr is bool) list[i].EnhancerUse = (bool)rr;
                         if (d.TryGetValue("inserts", out rr)) list[i].Inserts = JRate.Inserts.FromJson(rr);
                     }
                 }
@@ -586,6 +592,8 @@ namespace JRate
                     if (s.Reader != null) d["reader"] = s.Reader;
                     if (s.Reread != null) d["reread"] = s.Reread.Value;
                     if (s.Enhancer != null) d["enhancer"] = s.Enhancer;
+                    if (s.ReaderUse != null) d["readerUse"] = s.ReaderUse.Value;
+                    if (s.EnhancerUse != null) d["enhancerUse"] = s.EnhancerUse.Value;
                     if (s.Inserts != null) d["inserts"] = s.Inserts;
                     arr.Add(d);
                 }
