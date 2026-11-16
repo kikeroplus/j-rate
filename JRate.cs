@@ -1585,6 +1585,10 @@ namespace JRate
             enhancerSettings.Click += delegate { ShowLlmSettings(false); };
             menu.Items.Add(enhancerSettings);
             menu.Items.Add(new Separator());
+            // PrismLab に送る (PrismLab の spec 5 章)。中身はメニューを開くたびに作る (レシピは PrismLab で変わる)
+            var toPrismLab = new MenuItem { Header = "PrismLab に送る" };
+            menu.Items.Add(toPrismLab);
+            menu.Items.Add(new Separator());
 
             var ratingItems = new MenuItem[6];
             for (int i = 1; i <= 5; i++)
@@ -1626,6 +1630,8 @@ namespace JRate
                 makeAll.IsEnabled = shown > 0;
                 genInfo.IsEnabled = it != null && ComfyHistory.Find(it.Path) != null;
                 caption.IsEnabled = it != null && !it.IsVideo;
+                FillPrismLabMenu(toPrismLab, selected.Count > 0 ? selected
+                                             : (it != null ? new List<ImageItem> { it } : new List<ImageItem>()));
             };
 
             // 画像がないとき・処理中はメニューを出さない
@@ -1639,6 +1645,89 @@ namespace JRate
             mainArea.ContextMenuOpening += guard;
             thumbList.ContextMenu = menu;
             thumbList.ContextMenuOpening += guard;
+        }
+
+        // ---------------- PrismLab に送る (PrismLab の spec 5 章) ----------------
+        // 選んでいる画像 (動画は送らない) を、PrismLab の量産のレシピの入口か、開いている物語に入れてもらう。
+        private void FillPrismLabMenu(MenuItem parent, List<ImageItem> selected)
+        {
+            parent.Items.Clear();
+            var images = selected.Where(x => !x.IsVideo).Select(x => x.Path).ToList();
+            parent.IsEnabled = images.Count > 0;
+            parent.Header = images.Count > 1 ? "PrismLab に送る (" + images.Count + " 枚)" : "PrismLab に送る";
+            if (images.Count == 0)
+            {
+                parent.Items.Add(new MenuItem { Header = "(画像がありません)", IsEnabled = false });
+                return;
+            }
+            string unit = images.Count > 1 ? " (" + images.Count + " 枚)" : "";
+            var names = PrismLabLink.RecipeNames();
+            if (names.Count > 0)
+            {
+                parent.Items.Add(new MenuItem { Header = "量産の入口に" + unit + ":", IsEnabled = false });
+                for (int i = 0; i < names.Count; i++)
+                {
+                    int index = i;
+                    string name = names[i];
+                    var mi = new MenuItem
+                    {
+                        Header = "    " + (name.Length > 0 ? name : "(名前なし)").Replace("_", "__"),
+                        ToolTip = "選んだ画像を、このレシピの入口 (選択) にします。始めるのは PrismLab で。"
+                    };
+                    mi.Click += delegate
+                    {
+                        SendToPrismLab(() => PrismLabLink.SendToRecipe(images, name, index),
+                                       images.Count + " 枚を PrismLab のレシピ「" + name + "」の入口に送りました。");
+                    };
+                    parent.Items.Add(mi);
+                }
+            }
+            else
+            {
+                parent.Items.Add(new MenuItem { Header = "(PrismLab のレシピがありません)", IsEnabled = false });
+            }
+            parent.Items.Add(new Separator());
+            var scenes = new MenuItem
+            {
+                Header = "物語: 新しいシーンにする" + unit,
+                ToolTip = "PrismLab で開いている物語の最後に、1 枚ずつシーンチェンジのシーンとして足します。"
+            };
+            scenes.Click += delegate
+            {
+                SendToPrismLab(() => PrismLabLink.SendToStory(images, "scenes"),
+                               images.Count + " 枚を PrismLab の物語に新しいシーンとして送りました。");
+            };
+            parent.Items.Add(scenes);
+            if (images.Count != 1) return;
+            var slots = new[]
+            {
+                new[] { "source", "物語: 選んでいるシーンの元画像に", "元画像" },
+                new[] { "reference", "物語: 選んでいるシーンのリファレンス (顔) に", "リファレンス (顔)" },
+                new[] { "last", "物語: 選んでいるシーンのラストフレームに", "ラストフレーム" },
+            };
+            foreach (var slot in slots)
+            {
+                var s = slot;
+                var mi = new MenuItem { Header = s[1] };
+                mi.Click += delegate
+                {
+                    SendToPrismLab(() => PrismLabLink.SendToStory(images, s[0]),
+                                   System.IO.Path.GetFileName(images[0]) + " を PrismLab の物語 (選んでいるシーンの" + s[2] + ") に送りました。");
+                };
+                parent.Items.Add(mi);
+            }
+        }
+
+        private void SendToPrismLab(Func<string> send, string done)
+        {
+            string problem;
+            Mouse.OverrideCursor = Cursors.Wait;
+            try { problem = send(); }
+            finally { Mouse.OverrideCursor = null; }
+            if (problem.Length > 0)
+                MessageBox.Show(this, problem, "PrismLab に送る - J-Rate", MessageBoxButton.OK, MessageBoxImage.Warning);
+            else
+                statusText.Text = done;
         }
 
         // ---------------- 生成する (ComfyUI) ----------------

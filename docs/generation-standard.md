@@ -460,6 +460,18 @@ J-Rate・PromptWordCrafter・ImageMimicArt は、生成と読み取りの登録�
 | プロンプトのプリセット | あり | なし | なし |
 | 画像の削除・コピー・移動での `.txt` | 一緒に動かす | (対象外) | 一緒に動かす (削除だけ) |
 
+### PrismLab に送る (2026-11-16)
+
+PrismLab (量産ライン・物語の生成アプリ) へ、選んだものを右クリックの「PrismLab に送る ▸」で渡す。決まりは PrismLab の `docs\spec.md` 5 章。
+
+| アプリ | 送るもの | 送り先 |
+|---|---|---|
+| J-Rate | 選んでいる画像 | 量産のレシピの入口 / 物語の新しいシーン / 1 枚なら選んでいるシーンの元画像・リファレンス (顔)・ラストフレーム |
+| PromptWordCrafter | 選んでいるテキスト (送る前に編集中の本文を保存) | 量産のレシピの入口 / 1 件なら物語の選んでいるシーンの元のプロンプト |
+
+- PrismLab の 2 重起動を止めるパイプ (`PrismLab-(ユーザー名)`) に JSON を 1 行 (改行で終わる) 書き、PrismLab が読み終えて切るまで待つ。動いていなければ `PrismLab.exe --send (JSON のパス)` で起動する。J-Rate は `PrismLabLink.cs`、PromptWordCrafter は `prismlab_link.py`。
+- 記録: PrismLab の量産・試作の行には `origin` (入口のファイル)・`originText` (入口がテキストのときの中身)・`recipe`・`step` を足す (GenCommon の `GenRequest`)。PromptWordCrafter の生成結果の帯は、PrismLab の記録の `origin` が表示中のテキストのものも出す (右上に「PL」の印)。テキストの名前を変えても PrismLab の出力の名前は変えず、`origin` だけ付け替える。
+
 ### J-Rate の対応状況
 
 | 決まり | J-Rate |
