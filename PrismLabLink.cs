@@ -97,7 +97,7 @@ namespace JRate
             });
         }
 
-        /// <summary>物語に送る。slot は scenes / source / reference / last。</summary>
+        /// <summary>物語に送る。slot は scenes / source / reference / last / batch (物語のバッチの最初の画像)。</summary>
         public static string SendToStory(IList<string> files, string slot)
         {
             return Send(new Dictionary<string, object>

@@ -1698,6 +1698,18 @@ namespace JRate
                                images.Count + " 枚を PrismLab の物語に新しいシーンとして送りました。");
             };
             parent.Items.Add(scenes);
+            var batch = new MenuItem
+            {
+                Header = "物語: バッチに足す..." + unit,
+                ToolTip = "PrismLab の「物語のバッチ」の設定の窓を出し、1 枚ごとに 1 件のバッチの最初の画像にします。"
+                          + "待ち行列に足すと、前のものが終わってから順に作ります。"
+            };
+            batch.Click += delegate
+            {
+                SendToPrismLab(() => PrismLabLink.SendToStory(images, "batch"),
+                               images.Count + " 枚を PrismLab の物語のバッチに送りました (PrismLab の窓で待ち行列に足します)。");
+            };
+            parent.Items.Add(batch);
             if (images.Count != 1) return;
             var slots = new[]
             {
