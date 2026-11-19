@@ -7,7 +7,7 @@ J-Rate で使いながら固めたもので、今後つくる生成アプリは�
 - ファイルの一覧・選択・評価などの操作は [ui-standard.md](ui-standard.md) に分けてある。
 - J-Rate は「手元の画像を元に生成する」(i2v / i2i) アプリ。元画像のない生成 (t2i / t2v) を作るときは、5 章の「元画像」に関わる部分を読み替える。
 - 末尾の「未確認の点」は、実際の ComfyUI での確認や利用者の判断がまだのもの。新しいアプリに持ち込む前に確かめる。
-- **この決まりを持つアプリ**: J-Rate (i2v / i2i)、PromptWordCrafter (テキスト → t2i / t2v)、ImageMimicArt (画像 → 読み取り → t2i / i2i)。生成と読み取りの登録 (接続先・ワークフローなど) は 3 つで共有し、Python の 2 つは同じ部品を使う (11 章)。アプリごとに違う点は、その節に名前を挙げて書く。
+- **この決まりを持つアプリ**: J-Rate (i2v / i2i)、PromptWordCrafter (テキスト → t2i / t2v)、ImageMimicArt (画像 → 読み取り → t2i / i2i)、MuseFactory (ローカル LLM で作ったプロンプトのテキスト → t2i / t2v。2026-11-19 から)。生成と読み取りの登録 (接続先・ワークフローなど) はすべてで共有し、Python のアプリは同じ部品を使う (11 章)。アプリごとに違う点は、その節に名前を挙げて書く。
 
 ---
 
@@ -447,19 +447,21 @@ J-Rate・PromptWordCrafter・ImageMimicArt は、生成と読み取りの登録�
 
 ### 共通の部品
 
-- PromptWordCrafter と ImageMimicArt (Python) は、生成と読み取りの部品を `C:\Users\ilove\Desktop\WindowsApp\AI_projects\GenCommon\` の `gencommon` パッケージで共有する (設定と共有の置き場所、ComfyUI とのやりとり、ワークフローの書き換え、ジョブ、記録、エンハンサー、読み取り、LLM、各ダイアログ)。直すときはここを 1 回直せば両方に効く。アプリに残すのは、プロンプトの取り方・出力の置き場所と名前・結果の結び付けなど、アプリの役割で違う部分だけ。
+- PromptWordCrafter・ImageMimicArt・MuseFactory (Python) は、生成と読み取りの部品を `C:\Users\ilove\Desktop\WindowsApp\AI_projects\GenCommon\` の `gencommon` パッケージで共有する (設定と共有の置き場所、ComfyUI とのやりとり、ワークフローの書き換え、ジョブ、記録、エンハンサー、読み取り、LLM、各ダイアログ)。直すときはここを 1 回直せば両方に効く。アプリに残すのは、プロンプトの取り方・出力の置き場所と名前・結果の結び付けなど、アプリの役割で違う部分だけ。
 - J-Rate (C#) は言語が違うので部品は共有できない。この文書と共有のファイルの形式で合わせる。
 
 ### アプリごとに違うところ (まとめ)
 
-| | J-Rate | PromptWordCrafter | ImageMimicArt |
-|---|---|---|---|
-| プロンプトの元 | 生成の画面で入力 (+ 説明プロンプト) | テキストファイルの本文 | 説明プロンプト (`.txt`) |
-| 元画像を ComfyUI に渡す | いつも | 渡さない | ワークフローに `LoadImage` があれば |
-| 出力の置き場所と名前 | 元画像と同じフォルダ、`_video` / `_i2i` | テキストのフォルダの中の `生成結果` フォルダ、`_t2i` / `_video` | 出力フォルダの下、`_mimic` |
-| 読み取り | あり (生成の画面・説明プロンプトの小窓) | なし | あり (右の枠・生成の画面) |
-| プロンプトのプリセット | あり | なし | なし |
-| 画像の削除・コピー・移動での `.txt` | 一緒に動かす | (対象外) | 一緒に動かす (削除だけ) |
+| | J-Rate | PromptWordCrafter | ImageMimicArt | MuseFactory |
+|---|---|---|---|---|
+| プロンプトの元 | 生成の画面で入力 (+ 説明プロンプト) | テキストファイルの本文 | 説明プロンプト (`.txt`) | テキストファイルの本文 (MuseFactory が LLM で作ったもの。プレビューは見るだけ) |
+| 元画像を ComfyUI に渡す | いつも | 渡さない | ワークフローに `LoadImage` があれば | 渡さない |
+| 出力の置き場所と名前 | 元画像と同じフォルダ、`_video` / `_i2i` | テキストのフォルダの中の `生成結果` フォルダ、`_t2i` / `_video` | 出力フォルダの下、`_mimic` | PromptWordCrafter と同じ (同じフォルダを PWC で開いても結果が帯に出る) |
+| 読み取り | あり (生成の画面・説明プロンプトの小窓) | なし | あり (右の枠・生成の画面) | なし |
+| プロンプトのプリセット | あり | なし | なし | なし |
+| 画像の削除・コピー・移動での `.txt` | 一緒に動かす | (対象外) | 一緒に動かす (削除だけ) | (対象外) |
+
+- MuseFactory の生成結果の帯・PrismLab に送る・テキストの読み方は、PromptWordCrafter の `results.py` / `results_view.py` / `prismlab_link.py` / `text_io.py` を写したもの (MuseFactory の `app\gen\`)。直すときは両方をそろえる。
 
 ### PrismLab に送る (2026-11-16)
 
@@ -470,6 +472,7 @@ PrismLab (量産ライン・物語の生成アプリ) へ、選んだものを�
 | J-Rate | 選んでいる画像 | 量産のレシピの入口 / 物語の新しいシーン / 物語のバッチの最初の画像 (2026-11-17。PrismLab で設定の窓を開き、待ち行列に足す) / 1 枚なら選んでいるシーンの元画像・リファレンス (顔)・ラストフレーム |
 | PromptWordCrafter | 選んでいるテキスト (送る前に編集中の本文を保存) | 量産のレシピの入口 / 1 件なら物語の選んでいるシーンの元のプロンプト |
 | PromptWordCrafter の生成結果の帯 | 選んでいる画像 (動画は送らない。作った順に並べて送る) | J-Rate と同じ (量産のレシピの入口 / 物語の新しいシーン / 物語のバッチの最初の画像 / 1 枚なら選んでいるシーンの元画像・リファレンス (顔)・ラストフレーム) |
+| MuseFactory | PromptWordCrafter と同じ (一覧で選んでいるテキスト・フォルダ・生成結果の帯の画像) | PromptWordCrafter と同じ |
 
 - PrismLab の 2 重起動を止めるパイプ (`PrismLab-(ユーザー名)`) に JSON を 1 行 (改行で終わる) 書き、PrismLab が読み終えて切るまで待つ。動いていなければ `PrismLab.exe --send (JSON のパス)` で起動する。J-Rate は `PrismLabLink.cs`、PromptWordCrafter は `prismlab_link.py`。
 - 記録: PrismLab の量産・試作の行には `origin` (入口のファイル)・`originText` (入口がテキストのときの中身)・`recipe`・`step` を足す (GenCommon の `GenRequest`)。PromptWordCrafter の生成結果の帯は、PrismLab の記録の `origin` が表示中のテキストのものも出す (右上に「PL」の印)。テキストの名前を変えても PrismLab の出力の名前は変えず、`origin` だけ付け替える。
