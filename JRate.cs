@@ -1279,6 +1279,9 @@ namespace JRate
             jobsButton = (Button)root.FindName("JobsButton");
             jobsButton.Click += delegate { ShowJobs(); };
             ((Button)root.FindName("ComfySettingsButton")).Click += delegate { ShowComfySettings(); };
+            recipeButton = (Button)root.FindName("RecipeButton");
+            recipeButton.Click += delegate { ShowRecipeMenu(); };
+            StartRecipePoll();
             ((Button)root.FindName("OpenButton")).Click += delegate { BrowseFolder(); };
             ((Button)root.FindName("RefreshButton")).Click += delegate { RefreshFolder(); };
             ((Button)root.FindName("GridButton")).Click += delegate { ShowGrid(); };
@@ -1585,6 +1588,9 @@ namespace JRate
             enhancerSettings.Click += delegate { ShowLlmSettings(false); };
             menu.Items.Add(enhancerSettings);
             menu.Items.Add(new Separator());
+            // PrismLab のレシピで生成 (PrismLab の spec 6 章)。中身はメニューを開くたびに作る (レシピは PrismLab で変わる)
+            var byRecipe = new MenuItem { Header = "PrismLab のレシピで生成" };
+            menu.Items.Add(byRecipe);
             // PrismLab に送る (PrismLab の spec 5 章)。中身はメニューを開くたびに作る (レシピは PrismLab で変わる)
             var toPrismLab = new MenuItem { Header = "PrismLab に送る" };
             menu.Items.Add(toPrismLab);
@@ -1632,6 +1638,7 @@ namespace JRate
                 caption.IsEnabled = it != null && !it.IsVideo;
                 FillPrismLabMenu(toPrismLab, selected.Count > 0 ? selected
                                              : (it != null ? new List<ImageItem> { it } : new List<ImageItem>()));
+                FillRecipeMenu(byRecipe, RecipeTargets());
             };
 
             // 画像がないとき・処理中はメニューを出さない
@@ -1740,6 +1747,252 @@ namespace JRate
                 MessageBox.Show(this, problem, "PrismLab に送る - J-Rate", MessageBoxButton.OK, MessageBoxImage.Warning);
             else
                 statusText.Text = done;
+        }
+
+        // ---------------- PrismLab のレシピで生成 (PrismLab の spec 6 章。2026-11-22) ----------------
+        // 生成の設定はすべて PrismLab で行い、J-Rate は PrismLab が出したレシピを選ぶだけ。PrismLab は画面を出さずに裏で生成し、
+        // 出来たファイルは元画像と同じフォルダに置く。進み具合は PrismLab が書くファイルを読み、出来たものを一覧に足す。
+
+        private const int RecipeConfirmCount = 30;   // これを超える件数を頼むときは確かめる
+        private Button recipeButton;
+        private DispatcherTimer recipeTimer;
+        private readonly Dictionary<string, DateTime> myRecipeRuns = new Dictionary<string, DateTime>();
+        private readonly Dictionary<string, int> recipeSeenPaths = new Dictionary<string, int>();
+        private readonly Dictionary<string, string> recipeLastState = new Dictionary<string, string>();
+        private List<RecipeStatus> activeRecipeRuns = new List<RecipeStatus>();
+
+        // レシピで生成するもの: 選んでいる画像 (なければ表示している画像)。動画は除く
+        private List<string> RecipeTargets()
+        {
+            var selected = SelectedItems();
+            if (selected.Count == 0 && Current != null) selected = new List<ImageItem> { Current };
+            return selected.Where(x => !x.IsVideo).Select(x => x.Path).ToList();
+        }
+
+        private void AddRecipeItems(ItemsControl parent, List<string> images)
+        {
+            var recipes = RecipeLink.Recipes();
+            if (recipes.Count == 0)
+                parent.Items.Add(new MenuItem
+                {
+                    Header = "(出してもらったレシピがありません。PrismLab の「ほかのアプリに出す」)", IsEnabled = false
+                });
+            foreach (var r in recipes)
+            {
+                var recipe = r;
+                var mi = new MenuItem
+                {
+                    Header = recipe.Name.Length > 0 ? recipe.Name : "(名前なし)",
+                    ToolTip = recipe.Problem.Length > 0 ? "⚠ " + recipe.Problem
+                              : recipe.Flow + (recipe.Repeat > 1 ? "\n回数 " + recipe.Repeat : ""),
+                    IsEnabled = recipe.Problem.Length == 0 && images.Count > 0
+                };
+                ToolTipService.SetShowOnDisabled(mi, true);
+                mi.Click += delegate { StartRecipe(recipe, images); };
+                parent.Items.Add(mi);
+            }
+        }
+
+        private void FillRecipeMenu(MenuItem parent, List<string> images)
+        {
+            parent.Items.Clear();
+            parent.Header = images.Count > 1 ? "PrismLab のレシピで生成 (" + images.Count + " 枚)" : "PrismLab のレシピで生成";
+            AddRecipeItems(parent, images);
+        }
+
+        // ツールバーの「レシピで生成 ▾」: レシピ・台・止める・PrismLab で直す
+        private void ShowRecipeMenu()
+        {
+            var images = RecipeTargets();
+            var menu = new ContextMenu();
+            menu.Items.Add(new MenuItem
+            {
+                Header = images.Count == 0 ? "生成する画像を選んでください"
+                         : (images.Count == 1 ? System.IO.Path.GetFileName(images[0]) : images.Count + " 枚") + " を生成するレシピ:",
+                IsEnabled = false
+            });
+            AddRecipeItems(menu, images);
+            menu.Items.Add(new Separator());
+
+            var machines = new MenuItem();
+            Action relabel = delegate
+            {
+                var urls = RecipeLink.Machines();
+                machines.Header = "台: " + (urls.Count > 0 ? string.Join(" · ", urls.Select(RecipeLink.NameOf)) : "なし");
+            };
+            relabel();
+            var chosen = RecipeLink.Machines();
+            var presets = ComfySettings.Presets;
+            for (int i = 0; i < presets.Length; i++)
+            {
+                if (presets[i].IsEmpty) continue;
+                string url = presets[i].Value.TrimEnd('/');
+                var mi = new MenuItem
+                {
+                    Header = presets[i].Label(i), IsCheckable = true, StaysOpenOnClick = true,
+                    IsChecked = chosen.Any(u => string.Equals(u, url, StringComparison.OrdinalIgnoreCase))
+                };
+                mi.Click += delegate
+                {
+                    var list = RecipeLink.Machines();
+                    list.RemoveAll(u => string.Equals(u, url, StringComparison.OrdinalIgnoreCase));
+                    if (mi.IsChecked)
+                    {
+                        if (list.Count >= RecipeLink.MaxMachines)
+                        {
+                            mi.IsChecked = false;
+                            MessageBox.Show(this, "台は " + RecipeLink.MaxMachines + " 台までです。", "台 - J-Rate",
+                                            MessageBoxButton.OK, MessageBoxImage.Information);
+                            return;
+                        }
+                        list.Add(url);
+                    }
+                    RecipeLink.SetMachines(list);
+                    relabel();
+                };
+                machines.Items.Add(mi);
+            }
+            machines.ToolTip = "J-Rate で使う ComfyUI を 3 台まで選びます (ほかのアプリとは別)。"
+                               + "台の空きは PrismLab が 1 か所で数えます (1 台に同時に 2 件まで)";
+            menu.Items.Add(machines);
+
+            if (activeRecipeRuns.Count > 0)
+            {
+                var stop = new MenuItem { Header = "生成を止める" };
+                foreach (var s in activeRecipeRuns)
+                {
+                    var st = s;
+                    var mi = new MenuItem { Header = "「" + st.Recipe + "」を止める (" + (st.Done + st.Failed) + "/" + st.Total + ")" };
+                    mi.Click += delegate { CancelRecipe(st); };
+                    stop.Items.Add(mi);
+                }
+                menu.Items.Add(stop);
+            }
+            var edit = new MenuItem { Header = "PrismLab で直す...", ToolTip = "レシピの中身・J-Rate に出すレシピは PrismLab で決めます" };
+            edit.Click += delegate { OpenPrismLab(); };
+            menu.Items.Add(edit);
+
+            menu.PlacementTarget = recipeButton;
+            menu.Placement = PlacementMode.Bottom;
+            menu.IsOpen = true;
+        }
+
+        private void StartRecipe(PublishedRecipe recipe, List<string> images)
+        {
+            if (images.Count == 0) return;
+            int total = images.Count * Math.Max(1, recipe.Repeat);
+            if (total > RecipeConfirmCount && MessageBox.Show(this, "「" + recipe.Name + "」で " + total + " 件を生成します。よろしいですか？",
+                    "PrismLab のレシピ - J-Rate", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
+                return;
+            string id;
+            string error = RecipeLink.Run(recipe, images, out id);
+            if (error.Length > 0)
+            {
+                MessageBox.Show(this, error, "PrismLab のレシピ - J-Rate", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            myRecipeRuns[id] = DateTime.Now;
+            statusText.Text = "「" + recipe.Name + "」で " + (images.Count == 1 ? System.IO.Path.GetFileName(images[0]) : images.Count + " 枚")
+                              + " の生成を PrismLab に頼みました (裏で動きます。出来たものは元画像と同じフォルダに入ります)。";
+            PollRecipes();
+        }
+
+        private void CancelRecipe(RecipeStatus st)
+        {
+            if (MessageBox.Show(this, "「" + st.Recipe + "」の生成を止めますか？ (出来たものは残します)", "中止 - J-Rate",
+                                MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes)
+                return;
+            string error = RecipeLink.Cancel(st.Id);
+            if (error.Length > 0)
+                MessageBox.Show(this, error, "中止 - J-Rate", MessageBoxButton.OK, MessageBoxImage.Warning);
+            PollRecipes();
+        }
+
+        private void OpenPrismLab()
+        {
+            string error = PrismLabLink.SendCommand(new Dictionary<string, object> { { "cmd", "show" } }, false);
+            if (error.Length == 0) return;
+            string exe = PrismLabLink.FindExe();
+            if (exe == null)
+            {
+                MessageBox.Show(this, "PrismLab が見つかりません。", "PrismLab - J-Rate", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            try { System.Diagnostics.Process.Start(exe); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "PrismLab を起動できません: " + ex.Message, "PrismLab - J-Rate",
+                                MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
+        private void StartRecipePoll()
+        {
+            recipeTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(1500) };
+            recipeTimer.Tick += delegate { PollRecipes(); };
+            recipeTimer.Start();
+        }
+
+        // 進み具合を読み、出来たファイルを一覧に足す (開いているフォルダのものだけ)。終わったら知らせる
+        private void PollRecipes()
+        {
+            Dictionary<string, RecipeStatus> sts;
+            try { sts = RecipeLink.Statuses(); }
+            catch (Exception) { return; }
+            foreach (var s in sts.Values)
+            {
+                int seen;
+                recipeSeenPaths.TryGetValue(s.Id, out seen);
+                for (int i = seen; i < s.Paths.Count; i++)
+                {
+                    string path = s.Paths[i];
+                    try { AddGeneratedFile(path, ImageLoader.ReadRating(path)); }
+                    catch (Exception) { }
+                }
+                recipeSeenPaths[s.Id] = s.Paths.Count;
+                string before;
+                recipeLastState.TryGetValue(s.Id, out before);
+                if (before == "running" && !s.Active)
+                {
+                    // 終わった: 元の★の引き継ぎは件の終わりに付くので、評価を読み直す
+                    foreach (var path in s.Paths)
+                    {
+                        var it = items.FirstOrDefault(x => string.Equals(x.Path, path, StringComparison.OrdinalIgnoreCase));
+                        if (it == null) continue;
+                        try { it.Rating = ImageLoader.ReadRating(path); }
+                        catch (Exception) { }
+                    }
+                    if (myRecipeRuns.ContainsKey(s.Id)) statusText.Text = RecipeLink.Line(s);
+                }
+                else if (before == null && !s.Active && myRecipeRuns.ContainsKey(s.Id))
+                    statusText.Text = RecipeLink.Line(s);   // 始める前に断られた・すぐ終わった
+                recipeLastState[s.Id] = s.State;
+            }
+            activeRecipeRuns = sts.Values.Where(x => x.Active).OrderBy(x => x.Created).ToList();
+            if (activeRecipeRuns.Count > 0)
+            {
+                int done = activeRecipeRuns.Sum(x => x.Done + x.Failed + x.Canceled);
+                int total = activeRecipeRuns.Sum(x => x.Total);
+                recipeButton.Content = "レシピで生成 ▾ (" + done + "/" + total + ")";
+                var lines = activeRecipeRuns.Select(RecipeLink.Line).ToList();
+                foreach (var m in activeRecipeRuns.SelectMany(x => x.Machines))
+                {
+                    object state, reason, name;
+                    if (m.TryGetValue("state", out state) && state != null && state.ToString() != "up"
+                        && m.TryGetValue("reason", out reason) && reason != null && reason.ToString().Length > 0)
+                    {
+                        m.TryGetValue("name", out name);
+                        lines.Add("台 " + name + ": " + reason);
+                    }
+                }
+                recipeButton.ToolTip = string.Join("\n", lines.Distinct());
+            }
+            else
+            {
+                recipeButton.Content = "レシピで生成 ▾";
+                recipeButton.ToolTip = "表示している画像 (複数選択しているときは選択中の画像すべて) を、PrismLab のレシピで生成します"
+                                       + " (PrismLab が裏で生成)。台の選択・進み具合・中止もここから";
+            }
         }
 
         // ---------------- 生成する (ComfyUI) ----------------

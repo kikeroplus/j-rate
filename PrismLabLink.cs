@@ -110,9 +110,18 @@ namespace JRate
         {
             var full = new Dictionary<string, object> { { "cmd", "send" }, { "from", Sender } };
             foreach (var kv in message) full[kv.Key] = kv.Value;
+            try { AllowSetForegroundWindow(-1); } catch (Exception) { }   // PrismLab が前に出られるように (ASFW_ANY)
+            return SendCommand(full, true, false);
+        }
+
+        public const string BackgroundArg = "--background";
+
+        /// <summary>送るものをそのまま 1 行で送る。start: 動いていなければ起動して渡す。
+        /// background: 起動するときに画面を出さない (PrismLab のレシピで生成するとき。RecipeLink)。</summary>
+        public static string SendCommand(Dictionary<string, object> full, bool start, bool background = true)
+        {
             string json = new JavaScriptSerializer().Serialize(full);
             byte[] data = new UTF8Encoding(false).GetBytes(json + "\n");
-            try { AllowSetForegroundWindow(-1); } catch (Exception) { }   // PrismLab が前に出られるように (ASFW_ANY)
 
             string pipe = PipeNameOverride ?? PipeName;
             try
@@ -149,6 +158,7 @@ namespace JRate
                 return "PrismLab に送れませんでした: " + ex.Message;
             }
 
+            if (!start) return "PrismLab が動いていません。";
             string exe = FindExe();
             if (exe == null)
                 return "PrismLab が見つかりません (デスクトップの Application に PrismLab.exe を置いてください)。";
@@ -156,8 +166,9 @@ namespace JRate
             {
                 string temp = Path.Combine(Path.GetTempPath(), "prismlab_send_" + Guid.NewGuid().ToString("N") + ".json");
                 File.WriteAllBytes(temp, new UTF8Encoding(false).GetBytes(json));
+                string args = (background ? BackgroundArg + " " : "") + SendArg + " \"" + temp + "\"";
                 if (StartOverride != null) StartOverride(exe, temp);
-                else Process.Start(new ProcessStartInfo(exe, SendArg + " \"" + temp + "\"") { UseShellExecute = false });
+                else Process.Start(new ProcessStartInfo(exe, args) { UseShellExecute = false });
             }
             catch (Exception ex)
             {
