@@ -1274,11 +1274,8 @@ namespace JRate
             typeImage.Click += delegate { typeFilter = typeFilter == 1 ? 0 : 1; ApplyFilter(); };
             typeVideo.Click += delegate { typeFilter = typeFilter == 2 ? 0 : 2; ApplyFilter(); };
             ((Button)root.FindName("FilterAll")).Click += delegate { filterValue = 0; typeFilter = 0; ApplyFilter(); };
-            generateButton = (Button)root.FindName("GenerateButton");
-            generateButton.Click += delegate { GenerateCurrent(); };
             jobsButton = (Button)root.FindName("JobsButton");
             jobsButton.Click += delegate { ShowJobs(); };
-            ((Button)root.FindName("ComfySettingsButton")).Click += delegate { ShowComfySettings(); };
             recipeButton = (Button)root.FindName("RecipeButton");
             recipeButton.Click += delegate { ShowRecipeMenu(); };
             StartRecipePoll();
@@ -1547,13 +1544,8 @@ namespace JRate
             menu.Items.Add(explorer);
             menu.Items.Add(new Separator());
 
-            // ComfyUI で動画や画像を生成 (画像のときだけ)
-            var makeVideo = new MenuItem { Header = "生成する (ComfyUI)" };
-            makeVideo.Click += delegate { GenerateCurrent(); };
-            menu.Items.Add(makeVideo);
-            var makeAll = new MenuItem { Header = "表示中の画像をまとめて生成する..." };
-            makeAll.Click += delegate { Generate(ShownImages(), null, "表示中の画像"); };
-            menu.Items.Add(makeAll);
+            // 生成は「PrismLab のレシピで生成」だけ (2026-11-22。前の「生成する」「まとめて生成」「生成ジョブ」「生成の設定」
+            // 「図で設定」「エンハンサーの設定」は外した)。説明プロンプトと、それが使う読み取りの設定は残す
             var caption = new MenuItem { Header = "説明プロンプト..." };
             caption.Click += delegate
             {
@@ -1568,25 +1560,9 @@ namespace JRate
                 if (it != null) ShowGenInfo(it);
             };
             menu.Items.Add(genInfo);
-            var showJobs = new MenuItem { Header = "生成ジョブの一覧...", InputGestureText = "Ctrl+J" };
-            showJobs.Click += delegate { ShowJobs(); };
-            menu.Items.Add(showJobs);
-            var comfySettings = new MenuItem { Header = "生成の設定..." };
-            comfySettings.Click += delegate { ShowComfySettings(); };
-            menu.Items.Add(comfySettings);
-            var diagramSettings = new MenuItem
-            {
-                Header = "図で設定...",
-                ToolTip = "設定・処理・送る前の確認を図のように並べた画面で、次に生成するときの設定を決めます (生成はしません)"
-            };
-            diagramSettings.Click += delegate { ShowDiagramSettings(); };
-            menu.Items.Add(diagramSettings);
-            var readerSettings = new MenuItem { Header = "読み取りの設定..." };
+            var readerSettings = new MenuItem { Header = "読み取りの設定...", ToolTip = "説明プロンプトの読み取りで使う設定" };
             readerSettings.Click += delegate { ShowLlmSettings(true); };
             menu.Items.Add(readerSettings);
-            var enhancerSettings = new MenuItem { Header = "エンハンサーの設定..." };
-            enhancerSettings.Click += delegate { ShowLlmSettings(false); };
-            menu.Items.Add(enhancerSettings);
             menu.Items.Add(new Separator());
             // PrismLab のレシピで生成 (PrismLab の spec 6 章)。中身はメニューを開くたびに作る (レシピは PrismLab で変わる)
             var byRecipe = new MenuItem { Header = "PrismLab のレシピで生成" };
@@ -1628,12 +1604,7 @@ namespace JRate
                 deselect.IsEnabled = multi;
                 int images = selected.Count(x => !x.IsVideo);
                 clear.IsEnabled = selected.Any(x => x.Rating > 0);
-                makeVideo.Header = multi ? "選択中の画像を生成する (" + images + " 枚)..." : "生成する (ComfyUI)";
-                makeVideo.IsEnabled = images > 0;
                 del.Header = multi ? "選択中の " + selected.Count + " 個のファイルを削除 (ごみ箱へ)" : "ファイルを削除 (ごみ箱へ)";
-                int shown = ShownImages().Count;
-                makeAll.Header = "表示中の画像をまとめて生成する (" + shown + " 枚)...";
-                makeAll.IsEnabled = shown > 0;
                 genInfo.IsEnabled = it != null && ComfyHistory.Find(it.Path) != null;
                 caption.IsEnabled = it != null && !it.IsVideo;
                 FillPrismLabMenu(toPrismLab, selected.Count > 0 ? selected
@@ -2000,7 +1971,7 @@ namespace JRate
         private const int MaxRunningJobs = 2;   // 同じ接続先に同時に依頼する件数 (残りはこちらで待機させる)
         private readonly ObservableCollection<GenJob> jobs = new ObservableCollection<GenJob>();
         private JobWindow jobWindow;
-        private Button jobsButton, generateButton;
+        private Button jobsButton;
 
         // 表示している画像から生成する (動画のときは何もしない)。複数選択しているときは、選択している画像すべてから
         private void GenerateCurrent()
@@ -2398,6 +2369,8 @@ namespace JRate
         {
             int active = jobs.Count(j => j.IsActive);
             jobsButton.Content = active > 0 ? "生成ジョブ (" + active + (paused ? "・一時停止中" : "") + ")" : "生成ジョブ";
+            // 前の版で頼んだジョブが残っているときだけ出す (新しく頼むのは「レシピで生成」)
+            jobsButton.Visibility = jobs.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         }
 
         // ---------------- 一時停止 / 続きから始める (generation-standard 6 章) ----------------
@@ -2755,8 +2728,7 @@ namespace JRate
             }
             var dlg = new GenInfoDialog(item.FileName, record);
             dlg.Owner = gridWindow != null && gridWindow.IsActive ? (Window)gridWindow : this;
-            if (dlg.ShowDialog() == true && dlg.Regenerate)
-                Generate(new List<string> { record.Source }, record.Request);
+            dlg.ShowDialog();   // 「この設定で生成する...」は出さない (2026-11-22。生成は PrismLab のレシピで)
         }
 
         // 出来たファイルが今開いているフォルダのものなら一覧に加える。rating は書き込み済みの評価
@@ -3202,8 +3174,6 @@ namespace JRate
             var item = Current;
             int selected = thumbList.SelectedItems.Count;
             deselectButton.IsEnabled = selected > 1;
-            // 生成できるのは画像だけ (複数選択のときは、その中に画像があれば)
-            generateButton.IsEnabled = item != null && (selected > 1 ? SelectedItems().Any(x => !x.IsVideo) : !item.IsVideo);
             // 画像が 1 枚も表示されていないときの案内。「ありません」は読み込みが終わってから出す。
             emptyText.Visibility = thumbList.Items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             if (thumbList.Items.Count == 0)
@@ -3573,12 +3543,6 @@ namespace JRate
             if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.D)
             {
                 ClearMultiSelect();
-                e.Handled = true;
-                return;
-            }
-            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.J)
-            {
-                ShowJobs();
                 e.Handled = true;
                 return;
             }

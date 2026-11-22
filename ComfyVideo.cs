@@ -224,6 +224,8 @@ namespace JRate
     public class GenRecord
     {
         public string Output = "", Source = "", Time = "";
+        public string Recipe = "", Origin = "";   // PrismLab のレシピで出来たもの: レシピ名・入口のファイル
+        public int Step;                           // 何番目のステップか (1 から)
         public GenRequest Request = new GenRequest();
     }
 
@@ -273,18 +275,33 @@ namespace JRate
             catch { }
         }
 
-        // そのファイルを生成したときの記録。同じパスの記録を探し、なければ同じファイル名の
-        // 記録 (生成後に別のフォルダへコピー・移動したもの) を使う。どちらも新しいものが優先
+        // そのファイルを生成したときの記録。J-Rate の記録、なければ PrismLab の記録 (PrismLab のレシピで出来たもの。
+        // 2026-11-22) から探す。同じパスの記録を探し、なければ同じファイル名の記録 (生成後に別のフォルダへ
+        // コピー・移動したもの) を使う。どちらも新しいものが優先
         public static GenRecord Find(string outputPath)
         {
+            string prism = Path.Combine(Path.Combine(Path.GetDirectoryName(ComfySettings.AppDir), "PrismLab"), "comfy_history.txt");
+            GenRecord byName = null;
+            foreach (var file in new[] { ComfySettings.FilePath("comfy_history.txt"), prism })
+            {
+                bool exact;
+                var r = FindIn(file, outputPath, out exact);
+                if (r != null && exact) return r;
+                if (byName == null) byName = r;
+            }
+            return byName;
+        }
+
+        private static GenRecord FindIn(string file, string outputPath, out bool exact)
+        {
+            exact = false;
             try
             {
-                string file = ComfySettings.FilePath("comfy_history.txt");
                 string[] lines;
                 lock (Gate)
                 {
                     if (!File.Exists(file)) return null;
-                    lines = File.ReadAllLines(file, Encoding.UTF8);
+                    lines = ReadShared(file);
                 }
                 string name = Path.GetFileName(outputPath);
                 var json = ComfyVideo.NewSerializer();
@@ -298,7 +315,11 @@ namespace JRate
                     catch { continue; }
                     if (d == null) continue;
                     string output = ComfySettings.Str(d, "output");
-                    if (string.Equals(output, outputPath, StringComparison.OrdinalIgnoreCase)) return ToRecord(d);
+                    if (string.Equals(output, outputPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        exact = true;
+                        return ToRecord(d);
+                    }
                     if (byName == null && string.Equals(Path.GetFileName(output), name, StringComparison.OrdinalIgnoreCase))
                         byName = d;
                 }
@@ -307,12 +328,24 @@ namespace JRate
             catch { return null; }
         }
 
+        // PrismLab が書き足している最中でも読めるように、書き込みを許して開く
+        private static string[] ReadShared(string file)
+        {
+            using (var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var sr = new StreamReader(fs, Encoding.UTF8))
+                return sr.ReadToEnd().Replace("\r\n", "\n").Split('\n');
+        }
+
         private static GenRecord ToRecord(Dictionary<string, object> d)
         {
             var r = new GenRecord();
             r.Output = ComfySettings.Str(d, "output");
             r.Source = ComfySettings.Str(d, "source");
             r.Time = ComfySettings.Str(d, "time");
+            r.Recipe = ComfySettings.Str(d, "recipe");
+            r.Origin = ComfySettings.Str(d, "origin");
+            int step;
+            if (int.TryParse(ComfySettings.Str(d, "step"), out step)) r.Step = step;
             r.Request.ConnectionName = ComfySettings.Str(d, "connection");
             r.Request.Url = ComfySettings.Str(d, "url");
             r.Request.WorkflowName = ComfySettings.Str(d, "workflow");

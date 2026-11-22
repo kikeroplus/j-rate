@@ -379,6 +379,13 @@ namespace JRate
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             grid.ColumnDefinitions.Add(new ColumnDefinition());
             AddRow(grid, "生成した日時", record.Time);
+            if (record.Recipe.Length > 0)
+            {
+                // PrismLab のレシピで出来たもの (J-Rate から頼んだものも)
+                AddRow(grid, "レシピ", record.Recipe + (record.Step > 0 ? "  (" + record.Step + " 番目のステップ)" : ""));
+                if (record.Origin.Length > 0 && !string.Equals(record.Origin, record.Source, StringComparison.OrdinalIgnoreCase))
+                    AddRow(grid, "入口", record.Origin);
+            }
             AddRow(grid, "元の画像", record.Source + (hasSource ? "" : "  (見つかりません)"));
             AddRow(grid, "接続先", req.ConnectionName.Length > 0 ? req.ConnectionName + "  (" + req.Url + ")" : req.Url);
             AddRow(grid, "ワークフロー", req.WorkflowName.Length > 0 && req.WorkflowName != Path.GetFileName(req.WorkflowPath)
@@ -443,6 +450,7 @@ namespace JRate
             };
             ToolTipService.SetShowOnDisabled(again, true);
             var close = new Button { Content = "閉じる", Width = 90, IsCancel = true, IsDefault = true, Margin = new Thickness(8, 0, 0, 0) };
+            again.Visibility = Visibility.Collapsed;   // 「この設定で生成する...」は出さない (2026-11-22。生成は PrismLab のレシピで)
             buttons.Children.Add(again);
             buttons.Children.Add(close);
 
