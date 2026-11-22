@@ -7,7 +7,8 @@ J-Rate で使いながら固めたもので、今後つくる生成アプリは�
 - ファイルの一覧・選択・評価などの操作は [ui-standard.md](ui-standard.md) に分けてある。
 - J-Rate は「手元の画像を元に生成する」(i2v / i2i) アプリ。元画像のない生成 (t2i / t2v) を作るときは、5 章の「元画像」に関わる部分を読み替える。
 - 末尾の「未確認の点」は、実際の ComfyUI での確認や利用者の判断がまだのもの。新しいアプリに持ち込む前に確かめる。
-- **この決まりを持つアプリ**: J-Rate (i2v / i2i)、PromptWordCrafter (テキスト → t2i / t2v)、ImageMimicArt (画像 → 読み取り → t2i / i2i)、MuseFactory (ローカル LLM で作ったプロンプトのテキスト → t2i / t2v。2026-11-19 から)。生成と読み取りの登録 (接続先・ワークフローなど) はすべてで共有し、Python のアプリは同じ部品を使う (11 章)。アプリごとに違う点は、その節に名前を挙げて書く。
+- **ImageMimicArt は 2026-11-22 に開発を終え、今後は使わない** (利用者の決定。J-Rate・PromptWordCrafter・MuseFactory・PrismLab の 4 本でほしい機能がそろったため)。この文書の ImageMimicArt の記述は当時のまま残す (読むときは除いてよい)。
+- **この決まりを持つアプリ**: J-Rate (i2v / i2i)、PromptWordCrafter (テキスト → t2i / t2v)、ImageMimicArt (画像 → 読み取り → t2i / i2i)、MuseFactory (ローカル LLM で作ったプロンプトのテキスト → t2i / t2v。2026-11-19 から)。生成の設定は PrismLab に集め、ほかのアプリは PrismLab のレシピで生成する (2026-11-22。6 章「PrismLab のレシピで生成する」)。生成と読み取りの登録 (接続先・ワークフローなど) はすべてで共有し、Python のアプリは同じ部品を使う (11 章)。アプリごとに違う点は、その節に名前を挙げて書く。
 
 ---
 
@@ -431,6 +432,8 @@ J-Rate での状況です。新しいアプリに持ち込む前に確かめて�
 ## 11. 3 つのアプリで共有するもの
 
 J-Rate・PromptWordCrafter・ImageMimicArt は、生成と読み取りの登録を共有し、同じ決まりで動く。
+
+- **ImageMimicArt は 2026-11-22 に開発を終え、今後は使わない** (利用者の決定。J-Rate・PromptWordCrafter・MuseFactory・PrismLab の 4 本でほしい機能がそろったため)。
 
 ### 共有の置き場所
 
