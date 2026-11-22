@@ -1759,9 +1759,28 @@ namespace JRate
                     IsEnabled = recipe.Problem.Length == 0 && images.Count > 0
                 };
                 ToolTipService.SetShowOnDisabled(mi, true);
+                mi.Icon = HazardMark(mi.IsEnabled);   // 押すと始まる印 (ツールバーの「レシピで生成」と同じ縞)
+                if (mi.IsEnabled) mi.FontWeight = FontWeights.Bold;
                 mi.Click += delegate { StartRecipe(recipe, images); };
                 parent.Items.Add(mi);
             }
+        }
+
+        // 黄色と黒のななめ縞の小さな四角 (押せないものは灰色)
+        private static FrameworkElement HazardMark(bool on)
+        {
+            var brush = new LinearGradientBrush
+            {
+                StartPoint = new Point(0, 6), EndPoint = new Point(6, 0),
+                MappingMode = BrushMappingMode.Absolute, SpreadMethod = GradientSpreadMethod.Repeat
+            };
+            Color a = on ? Color.FromRgb(0xF5, 0xC4, 0x00) : Color.FromRgb(0xA8, 0xA8, 0xA8);
+            Color b = on ? Color.FromRgb(0x1A, 0x1A, 0x1A) : Color.FromRgb(0x6A, 0x6A, 0x6A);
+            brush.GradientStops.Add(new GradientStop(a, 0));
+            brush.GradientStops.Add(new GradientStop(a, 0.5));
+            brush.GradientStops.Add(new GradientStop(b, 0.5));
+            brush.GradientStops.Add(new GradientStop(b, 1));
+            return new System.Windows.Shapes.Rectangle { Width = 14, Height = 14, Fill = brush, RadiusX = 2, RadiusY = 2 };
         }
 
         private void FillRecipeMenu(MenuItem parent, List<string> images)

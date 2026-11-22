@@ -2,6 +2,13 @@
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Background="#202020" TextOptions.TextFormattingMode="Display">
   <Grid.Resources>
+    <!-- 黄色と黒のななめ縞 (工事現場ふう)。「レシピで生成」のボタンの縁取り (2026-11-22 利用者の希望) -->
+    <LinearGradientBrush x:Key="HazardBrush" StartPoint="0,10" EndPoint="10,0" MappingMode="Absolute" SpreadMethod="Repeat">
+      <GradientStop Color="#F5C400" Offset="0"/>
+      <GradientStop Color="#F5C400" Offset="0.5"/>
+      <GradientStop Color="#1A1A1A" Offset="0.5"/>
+      <GradientStop Color="#1A1A1A" Offset="1"/>
+    </LinearGradientBrush>
     <Style x:Key="Btn" TargetType="Button">
       <Setter Property="Focusable" Value="False"/>
       <Setter Property="Foreground" Value="#EEEEEE"/>
@@ -32,6 +39,29 @@
       </Setter>
     </Style>
 
+    <Style x:Key="HazardBtn" TargetType="Button" BasedOn="{StaticResource Btn}">
+      <Setter Property="FontWeight" Value="Bold"/>
+      <Setter Property="Padding" Value="10,2"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border BorderBrush="{StaticResource HazardBrush}" BorderThickness="4" CornerRadius="6">
+              <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="2" Padding="{TemplateBinding Padding}">
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Border>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#505050"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#626262"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style x:Key="Tgl" TargetType="ToggleButton">
       <Setter Property="Focusable" Value="False"/>
       <Setter Property="Foreground" Value="#EEEEEE"/>
@@ -176,7 +206,7 @@
       <!-- 生成は「レシピで生成 ▾」だけ (2026-11-22 利用者の決定: 生成の設定は PrismLab に寄せた)。
            「生成ジョブ」は、前の版で頼んで終わっていないジョブがあるときだけ出す -->
       <Button x:Name="JobsButton" Content="生成ジョブ" Style="{StaticResource Btn}" Visibility="Collapsed" ToolTip="前の版で頼んだ ComfyUI の生成の進み具合を一覧表示・キャンセル"/>
-      <Button x:Name="RecipeButton" Content="レシピで生成 ▾" Style="{StaticResource Btn}" ToolTip="表示している画像 (複数選択しているときは選択中の画像すべて) を、PrismLab のレシピで生成します (PrismLab が裏で生成)。台の選択・進み具合・中止もここから"/>
+      <Button x:Name="RecipeButton" Content="レシピで生成 ▾" Style="{StaticResource HazardBtn}" ToolTip="表示している画像 (複数選択しているときは選択中の画像すべて) を、PrismLab のレシピで生成します (PrismLab が裏で生成)。台の選択・進み具合・中止もここから"/>
       <Rectangle Width="1" Fill="#555555" Margin="10,6"/>
       <TextBlock Text="フィルター" Foreground="#AAAAAA" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="13"/>
       <ToggleButton x:Name="F1" Content="★1" Style="{StaticResource Tgl}"/>
