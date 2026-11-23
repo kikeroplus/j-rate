@@ -32,6 +32,7 @@ namespace JRate
         public double? FinishedAt;
         public List<string> Paths = new List<string>();
         public List<string> Errors = new List<string>();
+        public string Warning = "";  // 知らせ (失敗ではない。「LLM に繋がらないので、英語にせずに送りました (n 件)」)
         public List<Dictionary<string, object>> Machines = new List<Dictionary<string, object>>();
         public bool Active { get { return State == "running"; } }
     }
@@ -212,7 +213,8 @@ namespace JRate
                     Running = Int(d, "running"), Waiting = Int(d, "waiting"), Gated = Int(d, "gated"),
                     Outputs = Int(d, "outputs"), Created = Num(d, "created"),
                     FinishedAt = d.TryGetValue("finished_at", out fin) && fin != null ? (double?)Num(d, "finished_at") : null,
-                    Paths = StrList(d, "paths"), Errors = StrList(d, "errors")
+                    Paths = StrList(d, "paths"), Errors = StrList(d, "errors"),
+                    Warning = Str(d, "warning")
                 };
                 if (d.TryGetValue("machines", out ms) && ms is object[])
                     st.Machines = ((object[])ms).OfType<Dictionary<string, object>>().ToList();
@@ -223,6 +225,12 @@ namespace JRate
 
         /// <summary>進み具合の 1 行。</summary>
         public static string Line(RecipeStatus s)
+        {
+            string main = LineMain(s);
+            return s.Warning.Length > 0 && s.State != "error" ? main + "  ⚠ " + s.Warning : main;
+        }
+
+        static string LineMain(RecipeStatus s)
         {
             if (s.State == "error") return "✗「" + s.Recipe + "」: " + s.Error;
             int finished = s.Done + s.Failed + s.Canceled;
