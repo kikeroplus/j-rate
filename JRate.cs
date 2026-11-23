@@ -1838,6 +1838,7 @@ namespace JRate
                         list.Add(url);
                     }
                     RecipeLink.SetMachines(list);
+                    RecipeLink.UpdateMachines();  // PrismLab で動いている頼みも、この台で続ける
                     relabel();
                 };
                 machines.Items.Add(mi);

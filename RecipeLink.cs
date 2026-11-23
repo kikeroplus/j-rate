@@ -4,7 +4,8 @@
 // - 頼み方: パイプ PrismLab-(ユーザー名) に {"cmd": "run", "id", "from": "J-Rate", "recipe", "index", "files", "machines"}。
 //   PrismLab が動いていなければ「PrismLab.exe --background --send (JSON のパス)」で、画面を出さずに起動する。
 // - 進み具合: %APPDATA%\PrismLab\external_status.json (PrismLab が書く。こちらは読むだけ。出来たファイルのパスも入る)
-// - 台: J-Rate で選んだ台 (%APPDATA%\J-Rate\comfy_machines.txt。最大 3 台。アプリごと)
+// - 台: J-Rate で選んだ台 (%APPDATA%\J-Rate\comfy_machines.txt。最大 3 台。アプリごと)。台を変えたら {"cmd": "machines", ...} を送り、
+//   PrismLab で動いている頼みの台も入れ替えてもらう
 // - 出来たファイルは元画像と同じフォルダに PrismLab が置く (PromptWordCrafter・MuseFactory の GenCommon recipe_link.py と同じ決まり)
 using System;
 using System.Collections.Generic;
@@ -187,6 +188,17 @@ namespace JRate
                 { "cmd", "run" }, { "id", id }, { "from", App }, { "recipe", recipe.Name }, { "index", recipe.Index },
                 { "files", files.ToArray() }, { "machines", urls.ToArray() }
             }, true);
+        }
+
+        /// <summary>台を変えた: PrismLab で動いている J-Rate の頼みの台も入れ替えてもらう (2026-11-23 利用者の希望)。
+        /// PrismLab が動いていなければ何もしない (起動もしない)。画面が止まらないように裏で送る。</summary>
+        public static void UpdateMachines()
+        {
+            var urls = Machines().ToArray();
+            System.Threading.Tasks.Task.Run(() => PrismLabLink.SendCommand(new Dictionary<string, object>
+            {
+                { "cmd", "machines" }, { "from", App }, { "machines", urls }
+            }, false));
         }
 
         public static string Cancel(string id)
